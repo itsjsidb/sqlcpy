@@ -33,6 +33,9 @@ class UI {
   constructor(app) {
     this.app = app;
     this.cursor = 0;
+    this.selection = null;
+    this.sortBy = 'name';
+    this.sortDirection = 1;
     this.scroll = 0;
     this.queue = [];
     this.current = null;
@@ -79,11 +82,45 @@ class UI {
   }
 
   get items() { return this.app.items; }
-  selected() { return this.items[this.cursor]; }
+  sortedItems() {
+    const fields = {
+      name: (it) => it.name,
+      masterRows: (it) => it.kind === 'tables' ? (it.masterRows ?? it.master?.approxRows) : null,
+      slaveRows: (it) => it.kind === 'tables' ? (it.slaveRows ?? it.slave?.approxRows) : null,
+      size: (it) => it.kind === 'tables' ? it.master?.bytes : null,
+      status: (it) => ({ same: 0, different: 1, missing: 2, extra: 3, error: 4, queued: 5, copying: 6, checking: 7 })[it.status],
+    };
+    const value = fields[this.sortBy];
+    const kindOrder = new Map(KINDS.map((kind, index) => [kind, index]));
+    return [...this.items].sort((a, b) => {
+      const kindDiff = kindOrder.get(a.kind) - kindOrder.get(b.kind);
+      if (kindDiff) return kindDiff;
+      const aValue = value(a);
+      const bValue = value(b);
+      if (aValue == null) return bValue == null ? a.name.localeCompare(b.name) : 1;
+      if (bValue == null) return -1;
+      const diff = typeof aValue === 'string'
+        ? aValue.localeCompare(bValue, undefined, { numeric: true, sensitivity: 'base' })
+        : aValue - bValue;
+      return diff ? diff * this.sortDirection : a.name.localeCompare(b.name);
+    });
+  }
+
+  selected(items = this.sortedItems()) {
+    if (this.selection && items.includes(this.selection)) {
+      this.cursor = items.indexOf(this.selection);
+      return this.selection;
+    }
+    this.cursor = Math.max(0, Math.min(this.cursor, items.length - 1));
+    this.selection = items[this.cursor] || null;
+    return this.selection;
+  }
 
   async onKey(k) {
     if ((k.ctrl && k.name === 'c') || k.name === 'q') return this.quit();
-    const n = this.items.length;
+    const items = this.sortedItems();
+    const selected = this.selected(items);
+    const n = items.length;
     if (k.name === 'up' || k.name === 'k') this.cursor = Math.max(0, this.cursor - 1);
     else if (k.name === 'down' || k.name === 'j') this.cursor = Math.min(n - 1, this.cursor + 1);
     else if (k.name === 'pageup') this.cursor = Math.max(0, this.cursor - 10);
@@ -92,20 +129,33 @@ class UI {
     else if (k.name === 'end') this.cursor = Math.max(0, n - 1);
     else if (k.name === 'right' || k.name === 'tab') this.jumpSection(1);
     else if (k.name === 'left') this.jumpSection(-1);
-    else if (k.name === 'space') this.enqueue(this.selected(), false);
+    else if (k.name === 's' && k.shift) {
+      this.sortDirection *= -1;
+      this.cursor = this.sortedItems().indexOf(selected);
+      this.note(`Sort ${this.sortBy} ${this.sortDirection === 1 ? 'ascending' : 'descending'}`, 'cyan');
+    } else if (k.name === 's') {
+      const fields = ['name', 'masterRows', 'slaveRows', 'size', 'status'];
+      this.sortBy = fields[(fields.indexOf(this.sortBy) + 1) % fields.length];
+      this.cursor = this.sortedItems().indexOf(selected);
+      this.note(`Sort by ${this.sortBy} (${this.sortDirection === 1 ? 'ascending' : 'descending'})`, 'cyan');
+    } else if (k.name === 'space') this.enqueue(this.selected(), false);
     else if (k.name === 'f') this.enqueue(this.selected(), true);
     else if (k.name === 'a') this.enqueueAll();
     else if (k.name === 'x') this.cancel();
     else if (k.name === 'r') this.rescan();
+    if (k.name !== 's') this.selection = this.sortedItems()[this.cursor] || null;
+    else this.selected();
     this.render();
   }
 
   jumpSection(dir) {
     const it = this.selected();
     if (!it) return;
-    const kinds = KINDS.filter((kd) => this.items.some((i) => i.kind === kd));
+    const items = this.sortedItems();
+    const kinds = KINDS.filter((kd) => items.some((i) => i.kind === kd));
     const idx = (kinds.indexOf(it.kind) + dir + kinds.length) % kinds.length;
-    this.cursor = this.items.findIndex((i) => i.kind === kinds[idx]);
+    this.cursor = items.findIndex((i) => i.kind === kinds[idx]);
+    this.selection = items[this.cursor];
   }
 
   enqueue(item, force) {
@@ -121,7 +171,7 @@ class UI {
   }
 
   enqueueAll() {
-    for (const it of this.items) if (it.status === 'different' || it.status === 'missing') this.enqueue(it, false);
+    for (const it of this.sortedItems()) if (it.status === 'different' || it.status === 'missing') this.enqueue(it, false);
   }
 
   cancel() {
@@ -185,7 +235,8 @@ class UI {
   render() {
     const W = Math.max(60, process.stdout.columns || 100);
     const H = Math.max(15, process.stdout.rows || 30);
-    const items = this.items;
+    const items = this.sortedItems();
+    this.selected(items);
     const L = [];
 
     const m = this.app.cfg.master, s = this.app.cfg.slave;
@@ -196,7 +247,8 @@ class UI {
 
     const nameW = Math.max(16, W - 2 - 2 - 12 - 12 - 10 - 24 - 2);
     L.push(c('gray', ' ' + '─'.repeat(W - 2)));
-    L.push(c('dim', `   ${pad('NAME', nameW + 2)}${padL('MASTER ROWS', 12)} ${padL('SLAVE ROWS', 11)} ${padL('SIZE', 9)}  STATUS`));
+    const indicator = (key) => this.sortBy === key ? (this.sortDirection === 1 ? '↑' : '↓') : '';
+    L.push(c('dim', `   ${pad('NAME' + indicator('name'), nameW + 2)}${padL('MASTER ROWS' + indicator('masterRows'), 12)} ${padL('SLAVE ROWS' + indicator('slaveRows'), 11)} ${padL('SIZE' + indicator('size'), 9)}  STATUS${indicator('status')}`));
 
     // body rows (section headers interleaved)
     const rows = [];
@@ -254,7 +306,7 @@ class UI {
     const logs = this.log.slice(-3);
     while (logs.length < 3) logs.unshift('');
     for (const l of logs) L.push(' ' + l);
-    L.push(c('gray', ' ↑↓ move  ←→/tab section  ') + c('bold', 'space') + c('gray', ' copy  a copy all  f force  x cancel  r rescan  q quit'));
+    L.push(c('gray', ' ↑↓ move  ←→/tab section  ') + c('bold', 'space') + c('gray', ' copy  a copy all  f force  s sort column  S direction  x cancel  r rescan  q quit'));
 
     process.stdout.write('\x1b[H' + L.slice(0, H).map((l) => l + '\x1b[K').join('\n') + '\x1b[J');
   }
