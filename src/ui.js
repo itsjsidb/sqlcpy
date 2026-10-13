@@ -76,6 +76,7 @@ class UI {
     this.logLevelFilter = null;
     this.logSort = 'newest';
     this.logScroll = 0;
+    this.logItem = null;
     this.statusFilter = null;
     this.scroll = 0;
     this.queue = [];
@@ -110,8 +111,8 @@ class UI {
     process.stdin.pause();
   }
 
-  note(msg, col = 'gray') {
-    this.log.push({ t: Date.now(), msg, col });
+  note(msg, col = 'gray', item = null) {
+    this.log.push({ t: Date.now(), msg, col, item });
     if (this.log.length > 500) this.log.shift();
   }
 
@@ -121,7 +122,7 @@ class UI {
 
   visibleLogs() {
     const needle = this.logFilter.toLowerCase();
-    const list = this.log.filter((e) => (!this.logLevelFilter || this.logLevel(e) === this.logLevelFilter) && (!needle || e.msg.toLowerCase().includes(needle)));
+    const list = this.log.filter((e) => (!this.logItem || e.item === this.logItem) && (!this.logLevelFilter || this.logLevel(e) === this.logLevelFilter) && (!needle || e.msg.toLowerCase().includes(needle)));
     const rank = { error: 0, warn: 1, ok: 2, info: 3 };
     if (this.logSort === 'level') return list.sort((a, b) => rank[this.logLevel(a)] - rank[this.logLevel(b)] || b.t - a.t);
     return this.logSort === 'oldest' ? list : list.reverse();
@@ -134,12 +135,14 @@ class UI {
       else if (k.name === 'backspace') this.logFilter = this.logFilter.slice(0, -1);
       else if (k.sequence && k.sequence.length === 1 && k.sequence >= ' ' && !k.ctrl && !k.meta) this.logFilter += k.sequence;
       this.logScroll = 0;
+    this.logItem = null;
       return this.render();
     }
     const page = Math.max(1, (process.stdout.rows || 30) - 8);
     if (k.name === 'q') return this.quit();
     if (k.name === 'escape' && this.logFilter) { this.logFilter = ''; this.logScroll = 0; }
-    else if (k.name === 'escape' || k.name === 'l') this.view = 'main';
+    else if (k.name === 'escape' && this.logItem) { this.logItem = null; this.logScroll = 0; }
+    else if (k.name === 'escape' || k.name === 'l') { this.view = 'main'; this.logItem = null; }
     else if (k.sequence === '/') this.logFiltering = true;
     else if (k.name === 'up' || k.name === 'k') this.logScroll = Math.max(0, this.logScroll - 1);
     else if (k.name === 'down' || k.name === 'j') this.logScroll++;
@@ -151,10 +154,12 @@ class UI {
       const opts = [null, 'error', 'warn', 'ok', 'info'];
       this.logLevelFilter = opts[(opts.indexOf(this.logLevelFilter) + 1) % opts.length];
       this.logScroll = 0;
+    this.logItem = null;
     } else if (k.name === 's') {
       const opts = ['newest', 'oldest', 'level'];
       this.logSort = opts[(opts.indexOf(this.logSort) + 1) % opts.length];
       this.logScroll = 0;
+    this.logItem = null;
     } else if (k.name === 'c') { this.log = []; this.logScroll = 0; }
     this.render();
   }
@@ -168,7 +173,7 @@ class UI {
     this.logScroll = Math.max(0, Math.min(this.logScroll, list.length - bodyH));
     const n = (lv) => all.filter((e) => this.logLevel(e) === lv).length;
     const L = [];
-    L.push(` ${A.bold}${A.cyan}sqlcpy${A.reset}  ${A.bold}Log${A.reset}  ${c('gray', `${list.length}/${all.length} shown · sort: ${this.logSort}`)}${this.logLevelFilter ? '  ' + c('yellow', '[level: ' + this.logLevelFilter + ']') : ''}`);
+    L.push(` ${A.bold}${A.cyan}sqlcpy${A.reset}  ${A.bold}Log${A.reset}  ${c('gray', `${list.length}/${all.length} shown · sort: ${this.logSort}`)}${this.logItem ? '  ' + c('cyan', '[item: ' + this.logItem.name + ']') : ''}${this.logLevelFilter ? '  ' + c('yellow', '[level: ' + this.logLevelFilter + ']') : ''}`);
     L.push(` ${c('red', '✖ ' + n('error'))} errors  ${c('yellow', '! ' + n('warn'))} warnings  ${c('green', '✔ ' + n('ok'))} ok  ${c('gray', '• ' + n('info') + ' info')}`);
     L.push(this.logFiltering || this.logFilter
       ? ` ${c('cyan', '/')}${this.logFilter}${this.logFiltering ? c('cyan', '█') : ''} ${c('gray', this.logFiltering ? '· enter keep · esc clear' : '· esc clear')}`
@@ -206,12 +211,12 @@ class UI {
   rescanItem(item) {
     if (!item) return;
     if (this.scanning) return this.note('Full scan in progress', 'yellow');
-    if (item === this.current || this.queue.includes(item) || item.status === 'checking') return this.note(`${item.name}: busy, try again when it finishes`, 'yellow');
-    this.note(`Rescanning ${item.name}`, 'cyan');
+    if (item === this.current || this.queue.includes(item) || item.status === 'checking') return this.note(`${item.name}: busy, try again when it finishes`, 'yellow', item);
+    this.note(`Rescanning ${item.name}`, 'cyan', item);
     this.app.recheck(item).then((r) => {
-      if (!r) return this.note(`${item.name} no longer exists on either side – removed`, 'yellow');
-      this.note(`${item.name}: ${item.status}${item.detail ? ' – ' + item.detail : ''}`, item.status === 'error' ? 'red' : item.status === 'same' ? 'green' : 'yellow');
-    }).catch((e) => { const d = describe(e); this.note(`✖ Rescan of ${item.name} failed: ${d.code ? d.code + ' ' : ''}${d.message}`, 'red'); });
+      if (!r) return this.note(`${item.name} no longer exists on either side – removed`, 'yellow', item);
+      this.note(`${item.name}: ${item.status}${item.detail ? ' – ' + item.detail : ''}`, item.status === 'error' ? 'red' : item.status === 'same' ? 'green' : 'yellow', item);
+    }).catch((e) => { const d = describe(e); this.note(`✖ Rescan of ${item.name} failed: ${d.code ? d.code + ' ' : ''}${d.message}`, 'red', item); });
   }
 
   get items() { return this.app.items; }
@@ -268,7 +273,12 @@ class UI {
     if (this.view === 'log') return this.onLogKey(k);
     if (this.filtering) return this.onFilterKey(k);
     if (k.name === 'q') return this.quit();
-    if (k.name === 'l') { this.view = 'log'; this.logScroll = 0; this.render(); return; }
+    if (k.name === 'l') { this.view = 'log'; this.logItem = null; this.logScroll = 0; this.render(); return; }
+    if (k.name === 'e') {
+      const it = this.selected();
+      if (it) { this.view = 'log'; this.logItem = it; this.logScroll = 0; this.render(); }
+      return;
+    }
     if (k.sequence === '/') { this.filtering = true; this.render(); return; }
     if (k.name === 'v') {
       const opts = [null, 'same', 'different', 'missing', 'extra', 'error', 'queued'];
@@ -327,9 +337,9 @@ class UI {
 
   enqueue(item, force) {
     if (!item) return;
-    if (item.status === 'extra') return this.note(`${item.name}: only exists in slave, nothing to copy`, 'yellow');
-    if (item.status === 'checking') return this.note(`${item.name}: still being compared`, 'yellow');
-    if (item.status === 'same' && !force) return this.note(`${item.name}: already in sync – skipped (press f to force)`, 'yellow');
+    if (item.status === 'extra') return this.note(`${item.name}: only exists in slave, nothing to copy`, 'yellow', item);
+    if (item.status === 'checking') return this.note(`${item.name}: still being compared`, 'yellow', item);
+    if (item.status === 'same' && !force) return this.note(`${item.name}: already in sync – skipped (press f to force)`, 'yellow', item);
     if (item === this.current || this.queue.includes(item)) return;
     this.queue.push(item);
     item.prevStatus = item.status;
@@ -354,8 +364,8 @@ class UI {
     } else if (this.queue.includes(item)) {
       this.queue = this.queue.filter((q) => q !== item);
       item.status = item.prevStatus || 'different';
-      this.note(`Removed ${item.name} from queue`, 'yellow');
-    } else this.note(`${item.name}: not queued or copying`, 'gray');
+      this.note(`Removed ${item.name} from queue`, 'yellow', item);
+    } else this.note(`${item.name}: not queued or copying`, 'gray', item);
   }
 
   async pump() {
@@ -366,17 +376,17 @@ class UI {
       this.abort = new AbortController();
       this.progress = null;
       item.status = 'copying';
-      this.note(`Copying ${item.kind.slice(0, -1)} ${item.name}`, 'cyan');
+      this.note(`Copying ${item.kind.slice(0, -1)} ${item.name}`, 'cyan', item);
       try {
         const res = await this.app.copy(item, { signal: this.abort.signal, onProgress: (p) => { this.progress = p; } });
         this.done.set(item, res);
-        this.note(`✔ ${item.name} copied (${fmtNum(res.rows)} rows, ${fmtBytes(res.bytes)}) → ${res.file}`, 'green');
+        this.note(`✔ ${item.name} copied (${fmtNum(res.rows)} rows, ${fmtBytes(res.bytes)}) → ${res.file}`, 'green', item);
       } catch (e) {
         const d = describe(e);
         item.status = e.cancelled ? (item.prevStatus || 'different') : 'error';
         item.detail = e.cancelled ? 'cancelled' : `${d.code ? d.code + ': ' : ''}${d.message}${d.hint ? '  → ' + d.hint : ''}`;
-        this.note(e.cancelled ? `⏹ cancelled ${item.name}` : `✖ failed ${item.name}: ${d.code ? d.code + ' ' : ''}${d.message}`, e.cancelled ? 'yellow' : 'red');
-        if (!e.cancelled && d.hint) this.note('  → ' + d.hint, 'yellow');
+        this.note(e.cancelled ? `⏹ cancelled ${item.name}` : `✖ failed ${item.name}: ${d.code ? d.code + ' ' : ''}${d.message}`, e.cancelled ? 'yellow' : 'red', item);
+        if (!e.cancelled && d.hint) this.note('  → ' + d.hint, 'yellow', item);
       }
       this.current = null;
       this.progress = null;
@@ -460,7 +470,7 @@ class UI {
 
     const help = hintLines([
       ['↑↓', 'move'], ['←→', 'tab section'], ['space', 'copy'], ['a', 'copy all'], ['f', 'force'],
-      ['s', 'sort column'], ['S', 'sort ASC/DESC'], ['/', 'filter'], ['v', 'status filter'], ['l', 'log'],
+      ['s', 'sort column'], ['S', 'sort ASC/DESC'], ['/', 'filter'], ['v', 'status filter'], ['l', 'log'], ['e', 'item log'],
       ['x', 'cancel all'], ['c', 'cancel selected'], ['r', 'rescan all'], ['R', 'rescan selected'], ['q', 'quit'],
     ], W);
     const footerH = 8 + help.length;
