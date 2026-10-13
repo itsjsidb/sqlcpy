@@ -71,7 +71,7 @@
     },
     "hr_user_in_out_time":{
       "column": "date",
-      "last": "12m"
+      "last": "6m"
     }
   }
 }
