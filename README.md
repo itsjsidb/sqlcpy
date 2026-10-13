@@ -55,6 +55,7 @@ A different env file can be passed as the first argument: `sqlcpy path/to/.env`.
 |---|---|
 | `↑` `↓` / `j` `k` | move |
 | `←` `→` / `tab` | jump between sections |
+| `s` / `S` | cycle sort column (name, master rows, slave rows, size, status) / reverse direction |
 | `space` | copy selected object (skipped if already in sync) |
 | `a` | copy everything that differs or is missing |
 | `f` | force copy, even if in sync |
