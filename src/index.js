@@ -7,6 +7,7 @@ const { getDriver } = require('./drivers');
 const { KINDS, LABELS } = require('./objects');
 const { compareObject } = require('./compare');
 const { copyObject } = require('./copier');
+const { Rules } = require('./rules');
 
 /**
  * Library entry. Events: 'items' (after listing), 'item' (an item changed).
@@ -20,22 +21,71 @@ class SqlCpy extends EventEmitter {
     this.driver = getDriver(cfg.type);
     this.master = this.driver.createPool(cfg.master, cfg.concurrency);
     this.slave = this.driver.createPool(cfg.slave, cfg.concurrency);
+    this.rules = cfg.rules;
     this.items = [];
+    this.ignored = []; // [{ kind, name }] hidden by the config's "ignore" rules
+    this.warnings = [];
   }
 
   get ctx() {
     return { master: this.master, slave: this.slave, cfg: this.cfg, driver: this.driver };
   }
 
-  _list() {
+  /** Reload the policy file; keep the active rules unchanged if the new file is invalid. */
+  reloadConfig() {
+    const rules = Rules.load(this.cfg.configFile, {
+      required: this.cfg.configRequired,
+      salt: this.cfg.maskSalt,
+    });
+    if (rules.fingerprint === this.rules.fingerprint) return false;
+    this.rules = rules;
+    this.cfg.rules = rules;
+    return true;
+  }
+
+  /** List both sides with the config's "ignore" rules applied, so ignored objects are never compared, copied or dropped. */
+  async _list() {
     const { driver, cfg } = this;
-    return Promise.all([driver.listObjects(this.master, cfg.master.database), driver.listObjects(this.slave, cfg.slave.database)]);
+    const [m, s] = await Promise.all([driver.listObjects(this.master, cfg.master.database), driver.listObjects(this.slave, cfg.slave.database)]);
+    const fm = this.rules.filter(m);
+    const fsl = this.rules.filter(s);
+    const seen = new Set();
+    this.ignored = [...fm.ignored, ...fsl.ignored].filter((x) => !seen.has(x.kind + ':' + x.name) && seen.add(x.kind + ':' + x.name));
+    return [fm.listing, fsl.listing];
+  }
+
+  _scopeOf(item) {
+    return item.kind === 'tables' ? this.rules.scopeOf(item.name) : null;
+  }
+
+  /** Problems the user should see right away: unmatched protection rules, and old dumps written before a table was protected. */
+  _warnings() {
+    const out = [];
+    const tables = [...this.items.filter((i) => i.kind === 'tables' && i.master), ...this.ignored.filter((i) => i.kind === 'tables')];
+    out.push(...this.rules.unmatched(tables.map((t) => t.name)));
+    const dir = path.join(this.cfg.dumpDir, this.cfg.master.database);
+    const ignored = new Set(this.ignored.filter((i) => i.kind === 'tables').map((i) => i.name));
+    for (const t of tables) {
+      if (!ignored.has(t.name) && this.rules.scopeOf(t.name).mode === 'full') continue;
+      const file = path.join(dir, t.name + '.sql');
+      try {
+        const head = Buffer.alloc(400);
+        const fd = fs.openSync(file, 'r');
+        const n = fs.readSync(fd, head, 0, head.length, 0);
+        fs.closeSync(fd);
+        // dumps written under a rule carry a "-- scope:" line; anything else predates the rule and holds real rows
+        if (ignored.has(t.name) || !head.toString('utf8', 0, n).includes('-- scope:')) {
+          out.push(`stale dump ${file} was written before ${t.name} was protected and may contain real rows – delete it`);
+        }
+      } catch (e) { /* no dump – nothing to warn about */ }
+    }
+    return out;
   }
 
   get cacheKey() {
     const { cfg } = this;
     const side = (x) => `${x.host}:${x.port}/${x.database}`;
-    return `${cfg.type}|${side(cfg.master)}|${side(cfg.slave)}`;
+    return `${cfg.type}|${side(cfg.master)}|${side(cfg.slave)}|rules:${this.rules.fingerprint}`;
   }
 
   /** Restore items from the cache file; returns the scan time, or null if there is no usable cache. */
@@ -44,6 +94,8 @@ class SqlCpy extends EventEmitter {
       const data = JSON.parse(fs.readFileSync(this.cfg.cacheFile, 'utf8'));
       if (data.key !== this.cacheKey || !Array.isArray(data.items) || !data.items.length) return null;
       this.items = data.items.map((it) => ({ detail: '', ...it }));
+      for (const it of this.items) it.scope = this._scopeOf(it);
+      this.ignored = Array.isArray(data.ignored) ? data.ignored : [];
       this.scannedAt = data.scannedAt || null;
       return this.scannedAt || Date.now();
     } catch (e) {
@@ -59,7 +111,7 @@ class SqlCpy extends EventEmitter {
       return { kind, name, master, slave, status, detail, masterRows, slaveRows, checkedAt };
     });
     try {
-      const json = JSON.stringify({ key: this.cacheKey, scannedAt: this.scannedAt, items }, (k, v) => (typeof v === 'bigint' ? Number(v) : v));
+      const json = JSON.stringify({ key: this.cacheKey, scannedAt: this.scannedAt, ignored: this.ignored, items }, (k, v) => (typeof v === 'bigint' ? Number(v) : v));
       fs.mkdirSync(path.dirname(this.cfg.cacheFile), { recursive: true });
       fs.writeFileSync(this.cfg.cacheFile, json);
     } catch (e) { /* cache is best-effort */ }
@@ -73,7 +125,7 @@ class SqlCpy extends EventEmitter {
   async scan({ force = false } = {}) {
     if (!force) {
       const at = this._loadCache();
-      if (at) { this.emit('items', this.items); return { cached: true, at }; }
+      if (at) { this.warnings = this._warnings(); this.emit('items', this.items); return { cached: true, at }; }
     }
     this.scanning = true;
     try {
@@ -86,7 +138,7 @@ class SqlCpy extends EventEmitter {
             kind, name,
             master: m[kind].find((x) => x.name === name) || null,
             slave: s[kind].find((x) => x.name === name) || null,
-            status: 'checking', detail: '',
+            status: 'checking', detail: '', scope: this._scopeOf({ kind, name }),
           });
         }
       }
@@ -96,6 +148,7 @@ class SqlCpy extends EventEmitter {
         await this.check(it);
       }
       this.scannedAt = Date.now();
+      this.warnings = this._warnings();
     } finally {
       this.scanning = false;
     }

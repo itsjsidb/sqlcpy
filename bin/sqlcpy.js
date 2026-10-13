@@ -13,7 +13,7 @@ async function main() {
     cfg = loadConfig(process.argv[2]);
   } catch (e) {
     console.error(`${red('✖ Configuration error:')} ${e.message}`);
-    console.error(gray(`  Looked for .env in ${process.cwd()} (or pass a path: sqlcpy path/to/.env)`));
+    console.error(gray(`  ${e.hint || `Looked for .env in ${process.cwd()} (or pass a path: sqlcpy path/to/.env)`}`));
     process.exit(1);
   }
   if (!process.stdin.isTTY) {

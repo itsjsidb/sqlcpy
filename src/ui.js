@@ -1,5 +1,7 @@
 'use strict';
 const readline = require('readline');
+const fs = require('fs');
+const path = require('path');
 const { KINDS, LABELS } = require('./objects');
 const { describe } = require('./errors');
 
@@ -87,6 +89,8 @@ class UI {
     this.frame = 0;
     this.scanning = true;
     this.done = new Map(); // item -> {rows, bytes, file}
+    this.configWatcher = null;
+    this.configReloadTimer = null;
   }
 
   start() {
@@ -100,12 +104,67 @@ class UI {
     this.timer = setInterval(() => { this.frame++; this.render(); }, 100);
     this.app.on('items', () => this.render());
     this.app.on('item', () => this.render());
+    this.noteConfig();
+    this.watchConfig();
     this.rescan(false);
     this.render();
   }
 
+  watchConfig() {
+    const file = this.app.cfg.configFile;
+    const dir = path.dirname(file);
+    const base = path.basename(file);
+    try {
+      this.configWatcher = fs.watch(dir, { persistent: false }, (_, changed) => {
+        if (changed && changed.toString() !== base) return;
+        clearTimeout(this.configReloadTimer);
+        this.configReloadTimer = setTimeout(() => this.reloadConfig(), 250);
+      });
+      this.configWatcher.on('error', (e) => {
+        this.note(`✖ Config watcher failed: ${e.message}`, 'red');
+        this.render();
+      });
+    } catch (e) {
+      this.note(`✖ Cannot watch config file ${file}: ${e.message}`, 'red');
+    }
+  }
+
+  reloadConfig() {
+    if (this.current || this.queue.length || this.scanning) {
+      this.configReloadTimer = setTimeout(() => this.reloadConfig(), 500);
+      return;
+    }
+    try {
+      if (!this.app.reloadConfig()) return;
+      this.noteConfig();
+      this.note('Config saved – applying updated rules and rescanning', 'cyan');
+      this.rescan();
+    } catch (e) {
+      this.note(`✖ Config reload failed: ${e.message} – keeping the previous config`, 'red');
+      this.render();
+    }
+  }
+
+  noteConfig() {
+    const { rules, cfg } = this.app;
+    if (!rules.file) return this.note(`No config file at ${cfg.configFile} – every table is copied in full`, 'gray');
+    this.note(`Config ${rules.file}: ${rules.summary()}`, 'cyan');
+  }
+
+  /** After a scan (fresh or cached): what the config hid, and anything that looks unsafe. */
+  noteScanPolicy() {
+    const ig = this.app.ignored;
+    if (ig.length) {
+      const names = ig.slice(0, 8).map((i) => i.name).join(', ');
+      this.note(`${ig.length} object(s) ignored by config: ${names}${ig.length > 8 ? ', …' : ''}`, 'gray');
+    }
+    for (const w of this.app.warnings) this.note('! ' + w, 'yellow');
+  }
+
   stop() {
     clearInterval(this.timer);
+    clearTimeout(this.configReloadTimer);
+    if (this.configWatcher) this.configWatcher.close();
     process.stdout.write('\x1b[?25h\x1b[?1049l');
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     process.stdin.pause();
@@ -202,7 +261,8 @@ class UI {
     this.scanning = true;
     this.app.scan({ force }).then((res) => {
       this.scanning = false;
-      if (res.cached) return this.note(`Loaded ${this.items.length} items from cache (scanned ${new Date(res.at).toLocaleString()}) – r rescan all, R rescan selected`, 'cyan');
+      this.noteScanPolicy();
+      if (res.cached) return this.note(`Loaded ${this.items.length} items from cache (scanned ${new Date(res.at).toLocaleString()}) – R rescan all, r rescan selected`, 'cyan');
       const f = this.items.filter((i) => i.status === 'error').length;
       this.note(f ? `Scan complete with ${f} error(s) – select the red items for details` : 'Scan complete', f ? 'yellow' : 'green');
     }).catch((e) => { this.scanning = false; const d = describe(e); this.note(`✖ Scan failed: ${d.code} ${d.message}`, 'red'); if (d.hint) this.note('  → ' + d.hint, 'yellow'); });
@@ -223,8 +283,8 @@ class UI {
   sortedItems() {
     const fields = {
       name: (it) => it.name,
-      masterRows: (it) => it.kind === 'tables' ? (it.masterRows ?? it.master?.approxRows) : null,
-      slaveRows: (it) => it.kind === 'tables' ? (it.slaveRows ?? it.slave?.approxRows) : null,
+      masterRows: (it) => it.kind === 'tables' ? (it.scope?.mode === 'range' ? it.master?.approxRows : it.masterRows ?? it.master?.approxRows) : null,
+      slaveRows: (it) => it.kind === 'tables' ? (it.scope?.mode === 'range' ? it.slave?.approxRows : it.slaveRows ?? it.slave?.approxRows) : null,
       size: (it) => it.kind === 'tables' ? it.master?.bytes : null,
       status: (it) => ({ same: 0, different: 1, missing: 2, extra: 3, error: 4, queued: 5, copying: 6, checking: 7 })[it.status],
     };
@@ -318,8 +378,8 @@ class UI {
     else if (k.name === 'a') this.enqueueAll();
     else if (k.name === 'x') this.cancel();
     else if (k.name === 'c') this.cancelItem(this.selected());
-    else if (k.name === 'r' && k.shift) this.rescanItem(this.selected());
-    else if (k.name === 'r') this.rescan();
+    else if (k.name === 'r' && k.shift) this.rescan();
+    else if (k.name === 'r') this.rescanItem(this.selected());
     if (k.name !== 's') this.selection = this.sortedItems()[this.cursor] || null;
     else this.selected();
     this.render();
@@ -380,7 +440,7 @@ class UI {
       try {
         const res = await this.app.copy(item, { signal: this.abort.signal, onProgress: (p) => { this.progress = p; } });
         this.done.set(item, res);
-        this.note(`✔ ${item.name} copied (${fmtNum(res.rows)} rows, ${fmtBytes(res.bytes)}) → ${res.file}`, 'green', item);
+        this.note(`✔ ${item.name} copied (${fmtNum(res.rows)} rows, ${fmtBytes(res.bytes)}${res.note ? ' · ' + res.note : ''}) → ${res.file}`, 'green', item);
       } catch (e) {
         const d = describe(e);
         item.status = e.cancelled ? (item.prevStatus || 'different') : 'error';
@@ -425,11 +485,11 @@ class UI {
     const W = Math.max(60, process.stdout.columns || 100);
     const H = Math.max(15, process.stdout.rows || 30);
     const items = this.sortedItems();
-    this.selected(items);
+    const selectedItem = this.selected(items);
     const L = [];
 
     const m = this.app.cfg.master, s = this.app.cfg.slave;
-    L.push(` ${A.bold}${A.cyan}sqlcpy${A.reset}  ${c('gray', 'master')} ${A.bold}${m.database}${A.reset}${c('gray', '@' + m.host)}  ${c('cyan', '➜')}  ${c('gray', 'slave')} ${A.bold}${s.database}${A.reset}${c('gray', '@' + s.host)}`);
+    L.push(` ${A.bold}${A.cyan}sqlcpy${A.reset}  ${c('gray', 'master')} ${A.bold}${m.database}${A.reset}${c('gray', '@' + m.host)}  ${c('cyan', '➜')}  ${c('gray', 'slave')} ${A.bold}${s.database}${A.reset}${c('gray', '@' + s.host)}${this.app.ignored.length ? '  ' + c('gray', '· ' + this.app.ignored.length + ' ignored') : ''}`);
     const cnt = (st) => this.items.filter((i) => i.status === st).length;
     const tabs = [
       [null, 'cyan', `All ${this.items.length}`],
@@ -450,10 +510,11 @@ class UI {
     const gap = Math.max(1, W - 1 - visLen(left) - visLen(tabBar));
     L.push(left + ' '.repeat(gap) + tabBar);
 
-    const nameW = Math.max(16, W - 2 - 2 - 12 - 12 - 10 - 24 - 2 - 10);
+    const scopeW = this.app.rules.empty ? 0 : 12; // SCOPE column only when a config has rules
+    const nameW = Math.max(scopeW ? 12 : 16, W - 2 - 2 - 12 - 12 - 10 - 24 - 2 - 10 - scopeW);
     L.push(c('gray', ' ' + '─'.repeat(W - 2)));
     const indicator = (key) => this.sortBy === key ? (this.sortDirection === 1 ? '↑' : '↓') : '';
-    L.push(c('dim', `   ${pad('NAME' + indicator('name'), nameW + 2)}${padL('MASTER ROWS' + indicator('masterRows'), 12)} ${padL('SLAVE ROWS' + indicator('slaveRows'), 11)} ${padL('SIZE' + indicator('size'), 9)}  ${pad('STATUS' + indicator('status'), 24)} ${padL('CHECKED', 9)}`));
+    L.push(c('dim', `   ${pad('NAME' + indicator('name'), nameW + 2)}${padL('MASTER ROWS' + indicator('masterRows'), 12)} ${padL('SLAVE ROWS' + indicator('slaveRows'), 11)} ${padL('SIZE' + indicator('size'), 9)}  ${pad('STATUS' + indicator('status'), 24)} ${scopeW ? pad('SCOPE', scopeW) : ''}${padL('CHECKED', 9)}`));
 
     // body rows (section headers interleaved)
     const rows = [];
@@ -466,14 +527,18 @@ class UI {
         rows.push({ header: ` ${A.bold}${LABELS[it.kind]}${A.reset} ${c('gray', '(' + inKind.length + ')')}${bad ? ' ' + c('yellow', bad + ' need copy') : ''}` });
       }
       rows.push({ it, idx });
+      if (it.scope && it.scope.mode === 'range') rows.push({ it, idx, scoped: true });
     });
 
     const help = hintLines([
       ['↑↓', 'move'], ['←→', 'tab section'], ['space', 'copy'], ['a', 'copy all'], ['f', 'force'],
       ['s', 'sort column'], ['S', 'sort ASC/DESC'], ['/', 'filter'], ['v', 'status filter'], ['l', 'log'], ['e', 'item log'],
-      ['x', 'cancel all'], ['c', 'cancel selected'], ['r', 'rescan all'], ['R', 'rescan selected'], ['q', 'quit'],
+      ['x', 'cancel all'], ['c', 'cancel selected'], ['R', 'rescan all'], ['r', 'rescan selected'], ['q', 'quit'],
     ], W);
-    const footerH = 8 + help.length;
+    const cur = this.current;
+    const detailItem = cur || selectedItem;
+    const hasScopeDetails = detailItem && detailItem.scope && detailItem.scope.mode !== 'full';
+    const footerH = 8 + help.length + (hasScopeDetails ? 1 : 0);
     const bodyH = Math.max(3, H - L.length - footerH);
     const curRow = Math.max(0, rows.findIndex((r) => r.idx === this.cursor));
     if (curRow < this.scroll) this.scroll = curRow;
@@ -483,12 +548,26 @@ class UI {
     for (const r of rows.slice(this.scroll, this.scroll + bodyH)) {
       if (r.header) { L.push(r.header); continue; }
       const it = r.it;
-      const sel = r.idx === this.cursor;
-      const mRows = it.kind === 'tables' ? (it.masterRows != null ? it.masterRows : it.master && it.master.approxRows) : null;
-      const sRows = it.kind === 'tables' ? (it.slaveRows != null ? it.slaveRows : it.slave && it.slave.approxRows) : null;
-      const size = it.kind === 'tables' && it.master ? fmtBytes(it.master.bytes) : it.kind === 'triggers' && it.master ? it.master.table : '';
-      const nameCol = pad(it.name, nameW);
-      const line = `${sel ? c('cyan', '❯ ') : '  '}${sel ? A.inv + nameCol + A.reset : nameCol}  ${padL(fmtNum(it.kind === 'tables' && it.master ? mRows : null), 11)} ${padL(fmtNum(it.kind === 'tables' && it.slave ? sRows : null), 11)} ${padL(size, 9)}  ${this.statusCell(it, 24)} ${c('gray', padL(fmtAgo(it.checkedAt), 9))}`;
+      const scoped = Boolean(r.scoped);
+      const sel = !scoped && r.idx === this.cursor;
+      const schemaOnly = it.scope && it.scope.mode === 'schema'; // rows withheld on purpose – nothing to show
+      const rangeScoped = it.scope && it.scope.mode === 'range';
+      const mRows = it.kind !== 'tables' || schemaOnly ? null
+        : scoped ? it.masterRows
+          : rangeScoped ? it.master && it.master.approxRows
+            : it.masterRows != null ? it.masterRows : it.master && it.master.approxRows;
+      const sRows = it.kind !== 'tables' || schemaOnly ? null
+        : scoped ? it.slaveRows
+          : rangeScoped ? it.slave && it.slave.approxRows
+            : it.slaveRows != null ? it.slaveRows : it.slave && it.slave.approxRows;
+      const scopeCell = scopeW ? c('cyan', pad((it.scope && it.scope.tag) || '', scopeW - 1)) + ' ' : '';
+      const size = scoped
+        ? it.master && it.master.avgRowLength > 0 && it.masterRows != null
+          ? `~${fmtBytes(it.masterRows * it.master.avgRowLength)}`
+          : '-'
+        : it.kind === 'tables' && it.master ? fmtBytes(it.master.bytes) : it.kind === 'triggers' && it.master ? it.master.table : '';
+      const nameCol = pad(scoped ? `↳ ${it.scope.tag} scoped` : it.name, nameW);
+      const line = `${sel ? c('cyan', '❯ ') : '  '}${sel ? A.inv + nameCol + A.reset : nameCol}  ${padL(fmtNum(it.kind === 'tables' && it.master ? mRows : null), 11)} ${padL(fmtNum(it.kind === 'tables' && it.slave ? sRows : null), 11)} ${padL(size, 9)}  ${this.statusCell(it, 24)} ${scopeCell}${c('gray', padL(fmtAgo(it.checkedAt), 9))}`;
       L.push(line);
     }
     if (!items.length) L.push(c('gray', '   No items match the filter'));
@@ -496,7 +575,6 @@ class UI {
 
     // footer
     L.push(c('gray', ' ' + '─'.repeat(W - 2)));
-    const cur = this.current;
     if (cur) {
       const p = this.progress || {};
       const frac = p.rowsTotal ? p.rowsDone / p.rowsTotal : 0;
@@ -513,6 +591,21 @@ class UI {
       L.push(it ? ` ${A.bold}${it.name}${A.reset} ${c(dcol, '– ' + detail.slice(0, Math.max(10, W - it.name.length - 8)))}` : '');
       L.push(it && detail.length > W - it.name.length - 8 ? '   ' + c(dcol, detail.slice(W - it.name.length - 8, W * 2 - it.name.length - 16)) : '');
       L.push('');
+    }
+    if (hasScopeDetails) {
+      const { scope } = detailItem;
+      let details;
+      if (scope.mode === 'schema') {
+        details = `${scope.tag} · rows and size withheld`;
+      } else {
+        const rows = `master ${fmtNum(detailItem.masterRows)} rows · slave ${fmtNum(detailItem.slaveRows)} rows`;
+        const rowLength = detailItem.master && detailItem.master.avgRowLength;
+        const bytes = scope.mode === 'range'
+          ? rowLength > 0 && detailItem.masterRows != null ? `~${fmtBytes(detailItem.masterRows * rowLength)} data` : '-'
+          : detailItem.master && detailItem.master.bytes != null ? `~${fmtBytes(detailItem.master.bytes)} total` : '-';
+        details = `${scope.tag} · ${rows} · size ${bytes}`;
+      }
+      L.push(c('gray', `   Scope: ${details}`));
     }
     const logs = this.log.slice(-3).map((e) => this.fmtLog(e));
     while (logs.length < 3) logs.unshift('');

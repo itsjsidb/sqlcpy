@@ -49,8 +49,20 @@ Legend: ✅ done · 🚧 in progress · 📋 planned · 🔮 later / optional ·
 - ✅ Text filter (`/`) and status filter (`v`)
 - ✅ Log view with level filter, text filter, sort (newest / oldest / level), clear
 - ✅ Per-item log (`e`) – log entries tagged with the item they belong to
-- ✅ Scan cache – instant startup from `.sqlcpy-cache.json`, `r` rescan all, `R` rescan one
+- ✅ Scan cache – instant startup from `.sqlcpy-cache.json`, `R` rescan all, `r` rescan one
 - ✅ Distinct status symbols (`●` `◐` `○` `◇` `◆` `▲`) and relative time ("just now")
+- ✅ SCOPE column (`schema only` / `masked` / `30d`), `· N ignored` in the header, policy + stale-dump warnings in the log
+
+### Policy file (`sqlcpy.config.jsonc`)
+- ✅ `ignore` – glob patterns; hidden from scan, compare and copy (triggers on ignored tables too)
+- ✅ `sensitive.tables` – structure only; **no row is ever selected** (nothing in slave, dumps or on the client)
+- ✅ `sensitive.columns` – `null` / `empty` / salted `hash`, computed by the master inside the `SELECT` (raw value never fetched); masked columns excluded from the sync check
+- ✅ `range` – only the latest rows (`last: 12h|7d|2w|1m|1y` or `since`); paging by `(range column, pk)` so the time index drives it; refuses unindexed columns unless `allowUnindexed`
+- ✅ Sync semantics: range table is **in sync when every master row inside the range is on the slave** (count + order-independent digest over the range; masked columns skipped)
+- ✅ Fail closed: strict schema (unknown keys error), column / type / index validation before anything on the slave is touched, typo'd table names warned, cache invalidated when the policy changes
+- ✅ Stale dumps written before a table was protected are flagged (never auto-deleted)
+- 🔮 Range on integer epoch columns (`unix` / `unix_ms`); "latest N rows" ranges; per-column `format`-preserving masks (emails, phone numbers)
+- ⚠️ Slave timezone: range cut-offs are compared in each session's time zone; fine when both servers share one (as today's copy already assumes for `TIMESTAMP`)
 
 ---
 
@@ -66,15 +78,19 @@ Legend: ✅ done · 🚧 in progress · 📋 planned · 🔮 later / optional ·
 | `CONCURRENCY` | 1 | must be 1–10 |
 | `DUMP_DIR` | ./dumps | local dump output |
 | `CACHE_FILE` | `<DUMP_DIR>/.sqlcpy-cache.json` | scan cache |
+| `CONFIG_FILE` | `./sqlcpy.config.jsonc` | policy file; optional, but an explicitly set path must exist |
+| `MASK_SALT` | – | required when the policy uses `"hash"` masking |
 
 ## 🏗️ Architecture
 
 | file | job |
 |---|---|
-| `src/config.js` | read .env, validate |
+| `src/config.js` | read .env, validate, load the policy |
+| `src/rules.js` | policy file: JSONC parse, strict validation, glob matching, per-table rule lookup |
+| `src/scope.js` | turn a table's rule into SQL (select list, range `WHERE`, paging order), validated against the live schema |
 | `src/drivers/` | one module per engine (`mysql.js`): pool, quoting, list objects, DDL, PK, count/checksum, session setup. Selected by `DB_TYPE` |
 | `src/objects.js` | object kinds + labels |
-| `src/compare.js` | decide in-sync / different / missing / extra |
+| `src/compare.js` | decide in-sync / different / missing / extra (scope-aware: range, masked, schema-only) |
 | `src/copier.js` | dump + copy one object; tables use keyset-paginated chunks with a pause between chunks |
 | `src/errors.js` | map driver errors to readable messages |
 | `src/index.js` | `SqlCpy` library class – scan(), copy(), compare() |
@@ -91,7 +107,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned · 🔮 later / optional ·
 | `f` | force copy |
 | `a` | copy all out-of-sync |
 | `x` / `c` | cancel queue / cancel selected |
-| `r` / `R` | rescan all / rescan selected |
+| `R` / `r` | rescan all / rescan selected |
 | `s` / `S` | cycle sort column / flip direction |
 | `/` | text filter |
 | `v` | cycle status filter · `esc` clears filters |

@@ -7,7 +7,7 @@
   "scripts": { "start": "node bin/sqlcpy.js" },
   "engines": { "node": ">=16" },
   "license": "MIT",
-  "files": ["bin", "src", "README.md", "LICENSE.md"],
+  "files": ["bin", "src", "README.md", "LICENSE.md", "sqlcpy.config.example.jsonc"],
   "dependencies": {
     "dotenv": "^16.4.5",
     "mysql2": "^3.11.0",
