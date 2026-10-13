@@ -17,12 +17,44 @@ const fmtBytes = (n) => {
   return (n / 1024 ** i).toFixed(i ? 1 : 0) + ' ' + u[i];
 };
 const fmtNum = (n) => (n == null ? '-' : Number(n).toLocaleString('en-US'));
+const fmtAgo = (t) => {
+  if (!t) return '-';
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+};
 const fmtTime = (s) => {
   s = Math.max(0, Math.round(s));
   return s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s` : `${s}s`;
 };
 const pad = (s, w) => (s.length > w ? s.slice(0, w - 1) + '…' : s.padEnd(w));
 const padL = (s, w) => (s.length > w ? s.slice(0, w) : s.padStart(w));
+const ANSI = /\[[0-9;]*m/g;
+// Truncate to w visible columns so a long line can never wrap and scroll the screen.
+const clip = (line, w) => {
+  if ((line.replace(ANSI, '')).length <= w) return line;
+  let out = '', vis = 0;
+  for (let i = 0; i < line.length && vis < w - 1;) {
+    const m = /^\[[0-9;]*m/.exec(line.slice(i));
+    if (m) { out += m[0]; i += m[0].length; } else { out += line[i++]; vis++; }
+  }
+  return out + A.reset + '…';
+};
+// Flow [key, label] hints onto as few lines as fit in w columns.
+const hintLines = (hints, w) => {
+  const lines = [];
+  let cur = '', len = 0;
+  hints.forEach(([k, label], i) => {
+    const text = ` ${k} ${label}${i < hints.length - 1 ? ' |' : ''}`;
+    if (len && len + text.length > w) { lines.push(cur); cur = ''; len = 0; }
+    cur += c('bold', ` ${k}`) + c('gray', ` ${label}${i < hints.length - 1 ? ' |' : ''}`);
+    len += text.length;
+  });
+  if (cur) lines.push(cur);
+  return lines;
+};
 const bar = (frac, w) => {
   const f = Math.max(0, Math.min(1, frac));
   const n = Math.round(f * w);
@@ -67,7 +99,7 @@ class UI {
     this.timer = setInterval(() => { this.frame++; this.render(); }, 100);
     this.app.on('items', () => this.render());
     this.app.on('item', () => this.render());
-    this.rescan();
+    this.rescan(false);
     this.render();
   }
 
@@ -157,14 +189,29 @@ class UI {
       c('bold', ' esc/l') + c('gray', ' back |') +
       c('bold', ' q') + c('gray', ' quit')
     );
-    process.stdout.write('\x1b[H' + L.slice(0, H).map((l) => l + '\x1b[K').join('\n') + '\x1b[J');
+    process.stdout.write('\x1b[H' + L.slice(0, H).map((l) => clip(l, W) + '\x1b[K').join('\n') + '\x1b[J');
   }
 
-  rescan() {
+  rescan(force = true) {
     if (this.current || this.queue.length) return this.note('Finish or cancel copying before rescanning', 'yellow');
     this.scanning = true;
-    this.app.scan().then(() => { this.scanning = false; const f = this.items.filter((i) => i.status === 'error').length; this.note(f ? `Scan complete with ${f} error(s) – select the red items for details` : 'Scan complete', f ? 'yellow' : 'green'); })
-      .catch((e) => { this.scanning = false; const d = describe(e); this.note(`✖ Scan failed: ${d.code} ${d.message}`, 'red'); if (d.hint) this.note('  → ' + d.hint, 'yellow'); });
+    this.app.scan({ force }).then((res) => {
+      this.scanning = false;
+      if (res.cached) return this.note(`Loaded ${this.items.length} items from cache (scanned ${new Date(res.at).toLocaleString()}) – r rescan all, R rescan selected`, 'cyan');
+      const f = this.items.filter((i) => i.status === 'error').length;
+      this.note(f ? `Scan complete with ${f} error(s) – select the red items for details` : 'Scan complete', f ? 'yellow' : 'green');
+    }).catch((e) => { this.scanning = false; const d = describe(e); this.note(`✖ Scan failed: ${d.code} ${d.message}`, 'red'); if (d.hint) this.note('  → ' + d.hint, 'yellow'); });
+  }
+
+  rescanItem(item) {
+    if (!item) return;
+    if (this.scanning) return this.note('Full scan in progress', 'yellow');
+    if (item === this.current || this.queue.includes(item) || item.status === 'checking') return this.note(`${item.name}: busy, try again when it finishes`, 'yellow');
+    this.note(`Rescanning ${item.name}`, 'cyan');
+    this.app.recheck(item).then((r) => {
+      if (!r) return this.note(`${item.name} no longer exists on either side – removed`, 'yellow');
+      this.note(`${item.name}: ${item.status}${item.detail ? ' – ' + item.detail : ''}`, item.status === 'error' ? 'red' : item.status === 'same' ? 'green' : 'yellow');
+    }).catch((e) => { const d = describe(e); this.note(`✖ Rescan of ${item.name} failed: ${d.code ? d.code + ' ' : ''}${d.message}`, 'red'); });
   }
 
   get items() { return this.app.items; }
@@ -261,6 +308,7 @@ class UI {
     else if (k.name === 'a') this.enqueueAll();
     else if (k.name === 'x') this.cancel();
     else if (k.name === 'c') this.cancelItem(this.selected());
+    else if (k.name === 'r' && k.shift) this.rescanItem(this.selected());
     else if (k.name === 'r') this.rescan();
     if (k.name !== 's') this.selection = this.sortedItems()[this.cursor] || null;
     else this.selected();
@@ -376,12 +424,12 @@ class UI {
     L.push(` ${c('green', '✔ ' + cnt('same'))} in sync  ${c('yellow', '≠ ' + cnt('different'))} differ  ${c('red', '✖ ' + cnt('missing'))} missing  ${c('gray', '• ' + cnt('extra') + ' extra')}  ${cnt('error') ? c('red', '⚠ ' + cnt('error') + ' error') + '  ' : ''}${c('magenta', '⧖ ' + this.queue.length + ' queued')}` +
       (this.scanning ? '  ' + c('gray', SPIN[this.frame % SPIN.length] + ' scanning ' + items.filter((i) => i.status !== 'checking').length + '/' + items.length) : ''));
 
-    const nameW = Math.max(16, W - 2 - 2 - 12 - 12 - 10 - 24 - 2);
+    const nameW = Math.max(16, W - 2 - 2 - 12 - 12 - 10 - 24 - 2 - 10);
     if (this.filtering || this.filter || this.statusFilter) {
       L.push(` ${c('cyan', '/')}${this.filter}${this.filtering ? c('cyan', '█') : ''}${this.statusFilter ? ' ' + c('yellow', '[status: ' + this.statusFilter + ']') : ''} ${c('gray', `${items.length}/${this.items.length} match${this.filtering ? ' · enter keep · esc clear' : ' · esc clear'}`)}`);
     } else L.push(c('gray', ' ' + '─'.repeat(W - 2)));
     const indicator = (key) => this.sortBy === key ? (this.sortDirection === 1 ? '↑' : '↓') : '';
-    L.push(c('dim', `   ${pad('NAME' + indicator('name'), nameW + 2)}${padL('MASTER ROWS' + indicator('masterRows'), 12)} ${padL('SLAVE ROWS' + indicator('slaveRows'), 11)} ${padL('SIZE' + indicator('size'), 9)}  STATUS${indicator('status')}`));
+    L.push(c('dim', `   ${pad('NAME' + indicator('name'), nameW + 2)}${padL('MASTER ROWS' + indicator('masterRows'), 12)} ${padL('SLAVE ROWS' + indicator('slaveRows'), 11)} ${padL('SIZE' + indicator('size'), 9)}  ${pad('STATUS' + indicator('status'), 24)} ${padL('CHECKED', 9)}`));
 
     // body rows (section headers interleaved)
     const rows = [];
@@ -396,7 +444,12 @@ class UI {
       rows.push({ it, idx });
     });
 
-    const footerH = 9;
+    const help = hintLines([
+      ['↑↓', 'move'], ['←→', 'tab section'], ['space', 'copy'], ['a', 'copy all'], ['f', 'force'],
+      ['s', 'sort column'], ['S', 'sort ASC/DESC'], ['/', 'filter'], ['v', 'status filter'], ['l', 'log'],
+      ['x', 'cancel all'], ['c', 'cancel selected'], ['r', 'rescan all'], ['R', 'rescan selected'], ['q', 'quit'],
+    ], W);
+    const footerH = 8 + help.length;
     const bodyH = Math.max(3, H - L.length - footerH);
     const curRow = Math.max(0, rows.findIndex((r) => r.idx === this.cursor));
     if (curRow < this.scroll) this.scroll = curRow;
@@ -411,7 +464,7 @@ class UI {
       const sRows = it.kind === 'tables' ? (it.slaveRows != null ? it.slaveRows : it.slave && it.slave.approxRows) : null;
       const size = it.kind === 'tables' && it.master ? fmtBytes(it.master.bytes) : it.kind === 'triggers' && it.master ? it.master.table : '';
       const nameCol = pad(it.name, nameW);
-      const line = `${sel ? c('cyan', '❯ ') : '  '}${sel ? A.inv + nameCol + A.reset : nameCol}  ${padL(fmtNum(it.kind === 'tables' && it.master ? mRows : null), 11)} ${padL(fmtNum(it.kind === 'tables' && it.slave ? sRows : null), 11)} ${padL(size, 9)}  ${this.statusCell(it, 24)}`;
+      const line = `${sel ? c('cyan', '❯ ') : '  '}${sel ? A.inv + nameCol + A.reset : nameCol}  ${padL(fmtNum(it.kind === 'tables' && it.master ? mRows : null), 11)} ${padL(fmtNum(it.kind === 'tables' && it.slave ? sRows : null), 11)} ${padL(size, 9)}  ${this.statusCell(it, 24)} ${c('gray', padL(fmtAgo(it.checkedAt), 9))}`;
       L.push(line);
     }
     if (!items.length) L.push(c('gray', '   No items match the filter'));
@@ -432,7 +485,7 @@ class UI {
     } else {
       const it = this.selected();
       const dcol = { same: 'green', different: 'yellow', missing: 'red', error: 'red', extra: 'gray' }[it && it.status] || 'gray';
-      const detail = it ? (it.detail || it.status) : '';
+      const detail = it ? (it.detail || it.status) + (it.checkedAt ? ` · checked ${new Date(it.checkedAt).toLocaleString()}` : '') : '';
       L.push(it ? ` ${A.bold}${it.name}${A.reset} ${c(dcol, '– ' + detail.slice(0, Math.max(10, W - it.name.length - 8)))}` : '');
       L.push(it && detail.length > W - it.name.length - 8 ? '   ' + c(dcol, detail.slice(W - it.name.length - 8, W * 2 - it.name.length - 16)) : '');
       L.push('');
@@ -440,38 +493,9 @@ class UI {
     const logs = this.log.slice(-3).map((e) => this.fmtLog(e));
     while (logs.length < 3) logs.unshift('');
     for (const l of logs) L.push(' ' + l);
-    L.push(
-      c('bold', ' ↑↓') +
-      c('gray', ' move |') +
-      c('bold', ' ←→ ') +
-      c('gray', ' tab section |') +
-      c('bold', ' space') +
-      c('gray', ' copy |') +
-      c('bold', ' a') +
-      c('gray', ' copy all |') +
-      c('bold', ' f') +
-      c('gray', ' force |') +
-      c('bold', ' s') +
-      c('gray', ' sort column |') +
-      c('bold', ' S') +
-      c('gray', ' sort ASC/DESC |') +
-      c('bold', ' /') +
-      c('gray', ' filter |') +
-      c('bold', ' v') +
-      c('gray', ' status filter |') +
-      c('bold', ' l') +
-      c('gray', ' log |') +
-      c('bold', ' x') +
-      c('gray', ' cancel all |') +
-      c('bold', ' c') +
-      c('gray', ' cancel selected |') +
-      c('bold', ' r') +
-      c('gray', ' rescan |') +
-      c('bold', ' q') +
-      c('gray', ' quit')
-    );
+    L.push(...help);
 
-    process.stdout.write('\x1b[H' + L.slice(0, H).map((l) => l + '\x1b[K').join('\n') + '\x1b[J');
+    process.stdout.write('\x1b[H' + L.slice(0, H).map((l) => clip(l, W) + '\x1b[K').join('\n') + '\x1b[J');
   }
 }
 

@@ -25,6 +25,7 @@ function load(envPath) {
     checksumMaxBytes: Number(e.CHECKSUM_MAX_MB || 50) * 1024 * 1024,
     dumpDir: path.resolve(e.DUMP_DIR || path.join(process.cwd(), 'dumps')),
   };
+  cfg.cacheFile = path.resolve(e.CACHE_FILE || path.join(cfg.dumpDir, '.sqlcpy-cache.json'));
   for (const s of ['master', 'slave']) {
     for (const k of ['host', 'user', 'database']) {
       if (!cfg[s][k]) throw new Error(`Missing ${s.toUpperCase()}_${k === 'user' ? 'USERNAME' : k.toUpperCase()} in .env`);
