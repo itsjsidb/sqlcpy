@@ -1,0 +1,16 @@
+{
+  "name": "sqlcpy",
+  "version": "0.1.0",
+  "description": "Interactive terminal tool to copy MySQL tables, views, routines and triggers from a master DB to a slave DB in safe chunks",
+  "main": "src/index.js",
+  "bin": { "sqlcpy": "bin/sqlcpy.js" },
+  "scripts": { "start": "node bin/sqlcpy.js" },
+  "engines": { "node": ">=16" },
+  "license": "MIT",
+  "files": ["bin", "src", "README.md", "LICENSE.md"],
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "mysql2": "^3.11.0",
+    "sqlstring": "^2.3.3"
+  }
+}
