@@ -38,6 +38,7 @@ class UI {
     this.sortDirection = 1;
     this.filter = '';
     this.filtering = false;
+    this.statusFilter = null;
     this.scroll = 0;
     this.queue = [];
     this.current = null;
@@ -95,7 +96,7 @@ class UI {
     const value = fields[this.sortBy];
     const kindOrder = new Map(KINDS.map((kind, index) => [kind, index]));
     const needle = this.filter.toLowerCase();
-    const visible = needle ? this.items.filter((it) => it.name.toLowerCase().includes(needle)) : this.items;
+    const visible = this.items.filter((it) => (!needle || it.name.toLowerCase().includes(needle)) && (!this.statusFilter || it.status === this.statusFilter));
     return [...visible].sort((a, b) => {
       const kindDiff = kindOrder.get(a.kind) - kindOrder.get(b.kind);
       if (kindDiff) return kindDiff;
@@ -137,8 +138,16 @@ class UI {
     if (this.filtering) return this.onFilterKey(k);
     if (k.name === 'q') return this.quit();
     if (k.sequence === '/') { this.filtering = true; this.render(); return; }
-    if (k.name === 'escape' && this.filter) {
-      this.filter = ''; this.cursor = 0; this.selection = null; this.scroll = 0;
+    if (k.name === 'v') {
+      const opts = [null, 'different', 'missing', 'same', 'extra', 'error', 'queued'];
+      this.statusFilter = opts[(opts.indexOf(this.statusFilter) + 1) % opts.length];
+      this.cursor = 0; this.selection = null; this.scroll = 0;
+      this.note(`Status filter: ${this.statusFilter || 'all'}`, 'cyan');
+      this.render();
+      return;
+    }
+    if (k.name === 'escape' && (this.filter || this.statusFilter)) {
+      this.filter = ''; this.statusFilter = null; this.cursor = 0; this.selection = null; this.scroll = 0;
       this.render();
       return;
     }
@@ -282,8 +291,8 @@ class UI {
       (this.scanning ? '  ' + c('gray', SPIN[this.frame % SPIN.length] + ' scanning ' + items.filter((i) => i.status !== 'checking').length + '/' + items.length) : ''));
 
     const nameW = Math.max(16, W - 2 - 2 - 12 - 12 - 10 - 24 - 2);
-    if (this.filtering || this.filter) {
-      L.push(` ${c('cyan', '/')}${this.filter}${this.filtering ? c('cyan', '█') : ''} ${c('gray', `${items.length}/${this.items.length} match${this.filtering ? ' · enter keep · esc clear' : ' · esc clear'}`)}`);
+    if (this.filtering || this.filter || this.statusFilter) {
+      L.push(` ${c('cyan', '/')}${this.filter}${this.filtering ? c('cyan', '█') : ''}${this.statusFilter ? ' ' + c('yellow', '[status: ' + this.statusFilter + ']') : ''} ${c('gray', `${items.length}/${this.items.length} match${this.filtering ? ' · enter keep · esc clear' : ' · esc clear'}`)}`);
     } else L.push(c('gray', ' ' + '─'.repeat(W - 2)));
     const indicator = (key) => this.sortBy === key ? (this.sortDirection === 1 ? '↑' : '↓') : '';
     L.push(c('dim', `   ${pad('NAME' + indicator('name'), nameW + 2)}${padL('MASTER ROWS' + indicator('masterRows'), 12)} ${padL('SLAVE ROWS' + indicator('slaveRows'), 11)} ${padL('SIZE' + indicator('size'), 9)}  STATUS${indicator('status')}`));
@@ -362,6 +371,8 @@ class UI {
       c('gray', ' sort ASC/DESC |') +
       c('bold', ' /') +
       c('gray', ' filter |') +
+      c('bold', ' v') +
+      c('gray', ' status filter |') +
       c('bold', ' x') +
       c('gray', ' cancel all |') +
       c('bold', ' c') +
