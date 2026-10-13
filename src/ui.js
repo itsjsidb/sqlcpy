@@ -306,7 +306,28 @@ class UI {
     const logs = this.log.slice(-3);
     while (logs.length < 3) logs.unshift('');
     for (const l of logs) L.push(' ' + l);
-    L.push(c('gray', ' ↑↓ move  ←→/tab section  ') + c('bold', 'space') + c('gray', ' copy  a copy all  f force  s sort column  S direction  x cancel  r rescan  q quit'));
+    L.push(
+      c('bold', ' ↑↓') +
+      c('gray', ' move |') +
+      c('bold', ' ←→ ') +
+      c('gray', ' tab section |') +
+      c('bold', ' space') +
+      c('gray', ' copy |') +
+      c('bold', ' a') +
+      c('gray', ' copy all |') +
+      c('bold', ' f') +
+      c('gray', ' force |') +
+      c('bold', ' s') +
+      c('gray', ' sort column |') +
+      c('bold', ' S') +
+      c('gray', ' sort ASC/DESC |') +
+      c('bold', ' x') +
+      c('gray', ' cancel |') +
+      c('bold', ' r') +
+      c('gray', ' rescan |') +
+      c('bold', ' q') +
+      c('gray', ' quit')
+    );
 
     process.stdout.write('\x1b[H' + L.slice(0, H).map((l) => l + '\x1b[K').join('\n') + '\x1b[J');
   }
