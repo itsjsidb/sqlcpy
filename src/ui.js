@@ -38,6 +38,12 @@ class UI {
     this.sortDirection = 1;
     this.filter = '';
     this.filtering = false;
+    this.view = 'main';
+    this.logFilter = '';
+    this.logFiltering = false;
+    this.logLevelFilter = null;
+    this.logSort = 'newest';
+    this.logScroll = 0;
     this.statusFilter = null;
     this.scroll = 0;
     this.queue = [];
@@ -73,8 +79,85 @@ class UI {
   }
 
   note(msg, col = 'gray') {
-    this.log.push(c(col, new Date().toLocaleTimeString() + ' ' + msg));
-    if (this.log.length > 50) this.log.shift();
+    this.log.push({ t: Date.now(), msg, col });
+    if (this.log.length > 500) this.log.shift();
+  }
+
+  fmtLog(e) { return c(e.col, new Date(e.t).toLocaleTimeString() + ' ' + e.msg); }
+
+  logLevel(e) { return { red: 'error', yellow: 'warn', green: 'ok' }[e.col] || 'info'; }
+
+  visibleLogs() {
+    const needle = this.logFilter.toLowerCase();
+    const list = this.log.filter((e) => (!this.logLevelFilter || this.logLevel(e) === this.logLevelFilter) && (!needle || e.msg.toLowerCase().includes(needle)));
+    const rank = { error: 0, warn: 1, ok: 2, info: 3 };
+    if (this.logSort === 'level') return list.sort((a, b) => rank[this.logLevel(a)] - rank[this.logLevel(b)] || b.t - a.t);
+    return this.logSort === 'oldest' ? list : list.reverse();
+  }
+
+  onLogKey(k) {
+    if (this.logFiltering) {
+      if (k.name === 'escape') { this.logFilter = ''; this.logFiltering = false; }
+      else if (k.name === 'return' || k.name === 'enter') this.logFiltering = false;
+      else if (k.name === 'backspace') this.logFilter = this.logFilter.slice(0, -1);
+      else if (k.sequence && k.sequence.length === 1 && k.sequence >= ' ' && !k.ctrl && !k.meta) this.logFilter += k.sequence;
+      this.logScroll = 0;
+      return this.render();
+    }
+    const page = Math.max(1, (process.stdout.rows || 30) - 8);
+    if (k.name === 'q') return this.quit();
+    if (k.name === 'escape' && this.logFilter) { this.logFilter = ''; this.logScroll = 0; }
+    else if (k.name === 'escape' || k.name === 'l') this.view = 'main';
+    else if (k.sequence === '/') this.logFiltering = true;
+    else if (k.name === 'up' || k.name === 'k') this.logScroll = Math.max(0, this.logScroll - 1);
+    else if (k.name === 'down' || k.name === 'j') this.logScroll++;
+    else if (k.name === 'pageup') this.logScroll = Math.max(0, this.logScroll - page);
+    else if (k.name === 'pagedown') this.logScroll += page;
+    else if (k.name === 'home') this.logScroll = 0;
+    else if (k.name === 'end') this.logScroll = Infinity;
+    else if (k.name === 'v') {
+      const opts = [null, 'error', 'warn', 'ok', 'info'];
+      this.logLevelFilter = opts[(opts.indexOf(this.logLevelFilter) + 1) % opts.length];
+      this.logScroll = 0;
+    } else if (k.name === 's') {
+      const opts = ['newest', 'oldest', 'level'];
+      this.logSort = opts[(opts.indexOf(this.logSort) + 1) % opts.length];
+      this.logScroll = 0;
+    } else if (k.name === 'c') { this.log = []; this.logScroll = 0; }
+    this.render();
+  }
+
+  renderLog() {
+    const W = Math.max(60, process.stdout.columns || 100);
+    const H = Math.max(15, process.stdout.rows || 30);
+    const all = this.log;
+    const list = this.visibleLogs();
+    const bodyH = H - 6;
+    this.logScroll = Math.max(0, Math.min(this.logScroll, list.length - bodyH));
+    const n = (lv) => all.filter((e) => this.logLevel(e) === lv).length;
+    const L = [];
+    L.push(` ${A.bold}${A.cyan}sqlcpy${A.reset}  ${A.bold}Log${A.reset}  ${c('gray', `${list.length}/${all.length} shown · sort: ${this.logSort}`)}${this.logLevelFilter ? '  ' + c('yellow', '[level: ' + this.logLevelFilter + ']') : ''}`);
+    L.push(` ${c('red', '✖ ' + n('error'))} errors  ${c('yellow', '! ' + n('warn'))} warnings  ${c('green', '✔ ' + n('ok'))} ok  ${c('gray', '• ' + n('info') + ' info')}`);
+    L.push(this.logFiltering || this.logFilter
+      ? ` ${c('cyan', '/')}${this.logFilter}${this.logFiltering ? c('cyan', '█') : ''} ${c('gray', this.logFiltering ? '· enter keep · esc clear' : '· esc clear')}`
+      : c('gray', ' ' + '─'.repeat(W - 2)));
+    for (const e of list.slice(this.logScroll, this.logScroll + bodyH)) {
+      const text = new Date(e.t).toLocaleTimeString() + ' ' + e.msg;
+      L.push(' ' + c(e.col, text.length > W - 2 ? text.slice(0, W - 3) + '…' : text));
+    }
+    if (!list.length) L.push(c('gray', '   No log entries'));
+    while (L.length < H - 2) L.push('');
+    L.push(c('gray', ' ' + '─'.repeat(W - 2)));
+    L.push(
+      c('bold', ' ↑↓') + c('gray', ' scroll |') +
+      c('bold', ' /') + c('gray', ' filter |') +
+      c('bold', ' v') + c('gray', ' level |') +
+      c('bold', ' s') + c('gray', ' sort newest/oldest/level |') +
+      c('bold', ' c') + c('gray', ' clear |') +
+      c('bold', ' esc/l') + c('gray', ' back |') +
+      c('bold', ' q') + c('gray', ' quit')
+    );
+    process.stdout.write('\x1b[H' + L.slice(0, H).map((l) => l + '\x1b[K').join('\n') + '\x1b[J');
   }
 
   rescan() {
@@ -135,8 +218,10 @@ class UI {
 
   async onKey(k) {
     if (k.ctrl && k.name === 'c') return this.quit();
+    if (this.view === 'log') return this.onLogKey(k);
     if (this.filtering) return this.onFilterKey(k);
     if (k.name === 'q') return this.quit();
+    if (k.name === 'l') { this.view = 'log'; this.logScroll = 0; this.render(); return; }
     if (k.sequence === '/') { this.filtering = true; this.render(); return; }
     if (k.name === 'v') {
       const opts = [null, 'different', 'missing', 'same', 'extra', 'error', 'queued'];
@@ -278,6 +363,7 @@ class UI {
   }
 
   render() {
+    if (this.view === 'log') return this.renderLog();
     const W = Math.max(60, process.stdout.columns || 100);
     const H = Math.max(15, process.stdout.rows || 30);
     const items = this.sortedItems();
@@ -351,7 +437,7 @@ class UI {
       L.push(it && detail.length > W - it.name.length - 8 ? '   ' + c(dcol, detail.slice(W - it.name.length - 8, W * 2 - it.name.length - 16)) : '');
       L.push('');
     }
-    const logs = this.log.slice(-3);
+    const logs = this.log.slice(-3).map((e) => this.fmtLog(e));
     while (logs.length < 3) logs.unshift('');
     for (const l of logs) L.push(' ' + l);
     L.push(
@@ -373,6 +459,8 @@ class UI {
       c('gray', ' filter |') +
       c('bold', ' v') +
       c('gray', ' status filter |') +
+      c('bold', ' l') +
+      c('gray', ' log |') +
       c('bold', ' x') +
       c('gray', ' cancel all |') +
       c('bold', ' c') +
