@@ -291,7 +291,9 @@ class UI {
     const value = fields[this.sortBy];
     const kindOrder = new Map(KINDS.map((kind, index) => [kind, index]));
     const needle = this.filter.toLowerCase();
-    const visible = this.items.filter((it) => (!needle || it.name.toLowerCase().includes(needle)) && (!this.statusFilter || it.status === this.statusFilter));
+    // The Queued tab also shows the item currently being copied, so the active row stays visible there.
+    const inFilter = (it) => !this.statusFilter || it.status === this.statusFilter || (this.statusFilter === 'queued' && it.status === 'copying');
+    const visible = this.items.filter((it) => (!needle || it.name.toLowerCase().includes(needle)) && inFilter(it));
     return [...visible].sort((a, b) => {
       const kindDiff = kindOrder.get(a.kind) - kindOrder.get(b.kind);
       if (kindDiff) return kindDiff;
@@ -499,7 +501,7 @@ class UI {
       ['extra', 'gray', `◇ Extra ${cnt('extra')}`],
     ];
     if (cnt('error') || this.statusFilter === 'error') tabs.push(['error', 'red', `▲ Error ${cnt('error')}`]);
-    tabs.push(['queued', 'magenta', `◆ Queued ${this.queue.length}`]);
+    tabs.push(['queued', 'magenta', `◆ Queued ${this.queue.length + (this.current ? 1 : 0)}`]);
     const tabBar = tabs.map(([key, col, label]) => (this.statusFilter === key ? A.inv + A[col] + A.bold + ` ${label} ` + A.reset : c(col, ` ${label} `))).join(c('gray', '│'));
     let left = '';
     if (this.filtering || this.filter || this.statusFilter) {
