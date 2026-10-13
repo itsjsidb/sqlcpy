@@ -271,7 +271,7 @@ class UI {
     if (k.name === 'l') { this.view = 'log'; this.logScroll = 0; this.render(); return; }
     if (k.sequence === '/') { this.filtering = true; this.render(); return; }
     if (k.name === 'v') {
-      const opts = [null, 'different', 'missing', 'same', 'extra', 'error', 'queued'];
+      const opts = [null, 'same', 'different', 'missing', 'extra', 'error', 'queued'];
       this.statusFilter = opts[(opts.indexOf(this.statusFilter) + 1) % opts.length];
       this.cursor = 0; this.selection = null; this.scroll = 0;
       this.note(`Status filter: ${this.statusFilter || 'all'}`, 'cyan');
@@ -421,13 +421,27 @@ class UI {
     const m = this.app.cfg.master, s = this.app.cfg.slave;
     L.push(` ${A.bold}${A.cyan}sqlcpy${A.reset}  ${c('gray', 'master')} ${A.bold}${m.database}${A.reset}${c('gray', '@' + m.host)}  ${c('cyan', '➜')}  ${c('gray', 'slave')} ${A.bold}${s.database}${A.reset}${c('gray', '@' + s.host)}`);
     const cnt = (st) => this.items.filter((i) => i.status === st).length;
-    L.push(` ${c('green', '✔ ' + cnt('same'))} in sync  ${c('yellow', '≠ ' + cnt('different'))} differ  ${c('red', '✖ ' + cnt('missing'))} missing  ${c('gray', '• ' + cnt('extra') + ' extra')}  ${cnt('error') ? c('red', '⚠ ' + cnt('error') + ' error') + '  ' : ''}${c('magenta', '⧖ ' + this.queue.length + ' queued')}` +
-      (this.scanning ? '  ' + c('gray', SPIN[this.frame % SPIN.length] + ' scanning ' + items.filter((i) => i.status !== 'checking').length + '/' + items.length) : ''));
+    const tabs = [
+      [null, 'cyan', `All ${this.items.length}`],
+      ['same', 'green', `✔ In sync ${cnt('same')}`],
+      ['different', 'yellow', `≠ Differ ${cnt('different')}`],
+      ['missing', 'red', `✖ Missing ${cnt('missing')}`],
+      ['extra', 'gray', `• Extra ${cnt('extra')}`],
+    ];
+    if (cnt('error') || this.statusFilter === 'error') tabs.push(['error', 'red', `⚠ Error ${cnt('error')}`]);
+    tabs.push(['queued', 'magenta', `⧖ Queued ${this.queue.length}`]);
+    const tabBar = tabs.map(([key, col, label]) => (this.statusFilter === key ? A.inv + A[col] + A.bold + ` ${label} ` + A.reset : c(col, ` ${label} `))).join(c('gray', '│'));
+    let left = '';
+    if (this.filtering || this.filter || this.statusFilter) {
+      left = ` ${c('cyan', '/')}${this.filter}${this.filtering ? c('cyan', '█') : ''} ${c('gray', `${items.length}/${this.items.length}${this.filtering ? ' · enter keep · esc clear' : ' · esc clear'}`)}`;
+    }
+    if (this.scanning) left += '  ' + c('gray', SPIN[this.frame % SPIN.length] + ' scanning ' + items.filter((i) => i.status !== 'checking').length + '/' + items.length);
+    const visLen = (str) => str.replace(/\x1b\[[0-9;]*m/g, '').length;
+    const gap = Math.max(1, W - 1 - visLen(left) - visLen(tabBar));
+    L.push(left + ' '.repeat(gap) + tabBar);
 
     const nameW = Math.max(16, W - 2 - 2 - 12 - 12 - 10 - 24 - 2 - 10);
-    if (this.filtering || this.filter || this.statusFilter) {
-      L.push(` ${c('cyan', '/')}${this.filter}${this.filtering ? c('cyan', '█') : ''}${this.statusFilter ? ' ' + c('yellow', '[status: ' + this.statusFilter + ']') : ''} ${c('gray', `${items.length}/${this.items.length} match${this.filtering ? ' · enter keep · esc clear' : ' · esc clear'}`)}`);
-    } else L.push(c('gray', ' ' + '─'.repeat(W - 2)));
+    L.push(c('gray', ' ' + '─'.repeat(W - 2)));
     const indicator = (key) => this.sortBy === key ? (this.sortDirection === 1 ? '↑' : '↓') : '';
     L.push(c('dim', `   ${pad('NAME' + indicator('name'), nameW + 2)}${padL('MASTER ROWS' + indicator('masterRows'), 12)} ${padL('SLAVE ROWS' + indicator('slaveRows'), 11)} ${padL('SIZE' + indicator('size'), 9)}  ${pad('STATUS' + indicator('status'), 24)} ${padL('CHECKED', 9)}`));
 
