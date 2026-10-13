@@ -36,6 +36,8 @@ class UI {
     this.selection = null;
     this.sortBy = 'name';
     this.sortDirection = 1;
+    this.filter = '';
+    this.filtering = false;
     this.scroll = 0;
     this.queue = [];
     this.current = null;
@@ -92,7 +94,9 @@ class UI {
     };
     const value = fields[this.sortBy];
     const kindOrder = new Map(KINDS.map((kind, index) => [kind, index]));
-    return [...this.items].sort((a, b) => {
+    const needle = this.filter.toLowerCase();
+    const visible = needle ? this.items.filter((it) => it.name.toLowerCase().includes(needle)) : this.items;
+    return [...visible].sort((a, b) => {
       const kindDiff = kindOrder.get(a.kind) - kindOrder.get(b.kind);
       if (kindDiff) return kindDiff;
       const aValue = value(a);
@@ -116,8 +120,28 @@ class UI {
     return this.selection;
   }
 
+  onFilterKey(k) {
+    if (k.name === 'escape') { this.filter = ''; this.filtering = false; }
+    else if (k.name === 'return' || k.name === 'enter') this.filtering = false;
+    else if (k.name === 'backspace') this.filter = this.filter.slice(0, -1);
+    else if (k.sequence && k.sequence.length === 1 && k.sequence >= ' ' && !k.ctrl && !k.meta) this.filter += k.sequence;
+    else if (k.name === 'up' || k.name === 'down') { this.filtering = false; return this.onKey(k); }
+    this.cursor = 0;
+    this.selection = null;
+    this.scroll = 0;
+    this.render();
+  }
+
   async onKey(k) {
-    if ((k.ctrl && k.name === 'c') || k.name === 'q') return this.quit();
+    if (k.ctrl && k.name === 'c') return this.quit();
+    if (this.filtering) return this.onFilterKey(k);
+    if (k.name === 'q') return this.quit();
+    if (k.sequence === '/') { this.filtering = true; this.render(); return; }
+    if (k.name === 'escape' && this.filter) {
+      this.filter = ''; this.cursor = 0; this.selection = null; this.scroll = 0;
+      this.render();
+      return;
+    }
     const items = this.sortedItems();
     const selected = this.selected(items);
     const n = items.length;
@@ -142,6 +166,7 @@ class UI {
     else if (k.name === 'f') this.enqueue(this.selected(), true);
     else if (k.name === 'a') this.enqueueAll();
     else if (k.name === 'x') this.cancel();
+    else if (k.name === 'c') this.cancelItem(this.selected());
     else if (k.name === 'r') this.rescan();
     if (k.name !== 's') this.selection = this.sortedItems()[this.cursor] || null;
     else this.selected();
@@ -178,6 +203,17 @@ class UI {
     for (const it of this.queue) it.status = it.prevStatus || 'different';
     this.queue = [];
     if (this.abort) this.abort.abort();
+  }
+
+  cancelItem(item) {
+    if (!item) return;
+    if (item === this.current) {
+      if (this.abort) this.abort.abort();
+    } else if (this.queue.includes(item)) {
+      this.queue = this.queue.filter((q) => q !== item);
+      item.status = item.prevStatus || 'different';
+      this.note(`Removed ${item.name} from queue`, 'yellow');
+    } else this.note(`${item.name}: not queued or copying`, 'gray');
   }
 
   async pump() {
@@ -241,12 +277,14 @@ class UI {
 
     const m = this.app.cfg.master, s = this.app.cfg.slave;
     L.push(` ${A.bold}${A.cyan}sqlcpy${A.reset}  ${c('gray', 'master')} ${A.bold}${m.database}${A.reset}${c('gray', '@' + m.host)}  ${c('cyan', '➜')}  ${c('gray', 'slave')} ${A.bold}${s.database}${A.reset}${c('gray', '@' + s.host)}`);
-    const cnt = (st) => items.filter((i) => i.status === st).length;
+    const cnt = (st) => this.items.filter((i) => i.status === st).length;
     L.push(` ${c('green', '✔ ' + cnt('same'))} in sync  ${c('yellow', '≠ ' + cnt('different'))} differ  ${c('red', '✖ ' + cnt('missing'))} missing  ${c('gray', '• ' + cnt('extra') + ' extra')}  ${cnt('error') ? c('red', '⚠ ' + cnt('error') + ' error') + '  ' : ''}${c('magenta', '⧖ ' + this.queue.length + ' queued')}` +
       (this.scanning ? '  ' + c('gray', SPIN[this.frame % SPIN.length] + ' scanning ' + items.filter((i) => i.status !== 'checking').length + '/' + items.length) : ''));
 
     const nameW = Math.max(16, W - 2 - 2 - 12 - 12 - 10 - 24 - 2);
-    L.push(c('gray', ' ' + '─'.repeat(W - 2)));
+    if (this.filtering || this.filter) {
+      L.push(` ${c('cyan', '/')}${this.filter}${this.filtering ? c('cyan', '█') : ''} ${c('gray', `${items.length}/${this.items.length} match${this.filtering ? ' · enter keep · esc clear' : ' · esc clear'}`)}`);
+    } else L.push(c('gray', ' ' + '─'.repeat(W - 2)));
     const indicator = (key) => this.sortBy === key ? (this.sortDirection === 1 ? '↑' : '↓') : '';
     L.push(c('dim', `   ${pad('NAME' + indicator('name'), nameW + 2)}${padL('MASTER ROWS' + indicator('masterRows'), 12)} ${padL('SLAVE ROWS' + indicator('slaveRows'), 11)} ${padL('SIZE' + indicator('size'), 9)}  STATUS${indicator('status')}`));
 
@@ -281,6 +319,7 @@ class UI {
       const line = `${sel ? c('cyan', '❯ ') : '  '}${sel ? A.inv + nameCol + A.reset : nameCol}  ${padL(fmtNum(it.kind === 'tables' && it.master ? mRows : null), 11)} ${padL(fmtNum(it.kind === 'tables' && it.slave ? sRows : null), 11)} ${padL(size, 9)}  ${this.statusCell(it, 24)}`;
       L.push(line);
     }
+    if (!items.length) L.push(c('gray', '   No items match the filter'));
     while (L.length < 4 + bodyH) L.push('');
 
     // footer
@@ -321,8 +360,12 @@ class UI {
       c('gray', ' sort column |') +
       c('bold', ' S') +
       c('gray', ' sort ASC/DESC |') +
+      c('bold', ' /') +
+      c('gray', ' filter |') +
       c('bold', ' x') +
-      c('gray', ' cancel |') +
+      c('gray', ' cancel all |') +
+      c('bold', ' c') +
+      c('gray', ' cancel selected |') +
       c('bold', ' r') +
       c('gray', ' rescan |') +
       c('bold', ' q') +
