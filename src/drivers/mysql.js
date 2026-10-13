@@ -212,6 +212,7 @@ function maskProblem(col, mode, columns) {
       if (source.maxLen == null) length = null;
       else if (length != null) length += source.maxLen;
     }
+    if (mode.maxLength != null) length = length == null ? mode.maxLength : Math.min(length, mode.maxLength);
     if (length != null && col.maxLen != null && length > col.maxLen) {
       return `may produce ${length} characters, exceeding its length limit of ${col.maxLen}`;
     }
@@ -239,7 +240,8 @@ function maskExpr(col, mode, salt) {
     const parts = mode.concat.map((part) => (
       typeof part === 'string' ? SqlString.escape(part) : quote(part.column)
     ));
-    return `CONCAT(${parts.join(', ')})`;
+    const joined = `CONCAT(${parts.join(', ')})`;
+    return mode.maxLength != null ? `LEFT(${joined}, ${Number(mode.maxLength)})` : joined;
   }
   if (mode === 'random') {
     if (NUMBER_TYPES.has(col.type)) return 'FLOOR(RAND() * 10)';

@@ -20,7 +20,8 @@
     //       "random" -> pseudo-random text or a number from 0 to 9 (may collide with UNIQUE indexes)
     //       { "value": "..." } -> a custom fixed value (type-checked)
     //       { "from": "other_column" } -> value from a compatible, unmasked non-key column
-    //       { "concat": [{ "column": "first_name" }, "@123", { "column": "last_name" }] }
+    //       { "concat": [{ "column": "first_name" }, "@123", { "column": "last_name" }], "maxLength": 100 }
+    //                  -> "maxLength" is optional: the joined text is trimmed to that many characters
     //                  -> join text columns and static text (not raw SQL)
     // Primary-key and range columns cannot be masked – use "tables" for those.
     "columns": {

@@ -115,6 +115,32 @@ test('rejects deriving from a masked column or a key column', async () => {
   );
 });
 
+test('caps a concat replacement with maxLength by trimming the extra characters', async () => {
+  const rules = new Rules({
+    sensitive: { columns: { users: { display_name: { concat: [{ column: 'first_name' }, '@', { column: 'last_name' }], maxLength: 40 } } } },
+  });
+  assert.deepEqual({ ...rules.tableRule('users').masks }, {
+    display_name: { concat: [{ column: 'first_name' }, '@', { column: 'last_name' }], maxLength: 40 },
+  });
+
+  const scope = await resolveScope(
+    context({ display_name: { concat: [{ column: 'first_name' }, '@', { column: 'last_name' }], maxLength: 40 } }),
+    'users',
+  );
+  assert.ok(scope.select.includes('LEFT(CONCAT(`first_name`, \'@\', `last_name`), 40) AS `display_name`'));
+});
+
+test('rejects a bad maxLength, or one that is not on a concat rule', () => {
+  assert.throws(
+    () => new Rules({ sensitive: { columns: { users: { email: { concat: ['a', 'b'], maxLength: 0 } } } } }),
+    /maxLength: must be a positive whole number/,
+  );
+  assert.throws(
+    () => new Rules({ sensitive: { columns: { users: { email: { value: 'x', maxLength: 5 } } } } }),
+    /maxLength: only applies to "concat"/,
+  );
+});
+
 test('validates replacement types and literal lengths', async () => {
   await assert.rejects(
     resolveScope(context({ display_name: { value: 'x'.repeat(41) } }), 'users'),

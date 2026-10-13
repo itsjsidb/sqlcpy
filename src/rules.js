@@ -124,9 +124,13 @@ class Rules {
               problems.push(`sensitive.columns.${table}.${col}: use one of ${MASK_MODES.join(', ')}, { "value": ... }, { "from": "other_column" }, or { "concat": [...] }`);
               continue;
             }
-            const keys = Object.keys(mask);
+            const keys = Object.keys(mask).filter((k) => k !== 'maxLength');
             if (keys.length !== 1 || !['value', 'from', 'concat'].includes(keys[0])) {
               problems.push(`sensitive.columns.${table}.${col}: give exactly one of "value", "from", or "concat"`);
+              continue;
+            }
+            if (mask.maxLength !== undefined && keys[0] !== 'concat') {
+              problems.push(`sensitive.columns.${table}.${col}.maxLength: only applies to "concat"`);
               continue;
             }
             if (keys[0] === 'from') {
@@ -151,6 +155,10 @@ class Rules {
                 problems.push(`sensitive.columns.${table}.${col}.concat: must be a list of at least two text or { "column": "name" } parts`);
                 continue;
               }
+              if (mask.maxLength !== undefined && !(Number.isInteger(mask.maxLength) && mask.maxLength > 0)) {
+                problems.push(`sensitive.columns.${table}.${col}.maxLength: must be a positive whole number of characters`);
+                continue;
+              }
               const parts = [];
               let valid = true;
               for (const [i, part] of mask.concat.entries()) {
@@ -164,7 +172,7 @@ class Rules {
                   valid = false;
                 }
               }
-              if (valid) normalized[col] = { concat: parts };
+              if (valid) normalized[col] = mask.maxLength === undefined ? { concat: parts } : { concat: parts, maxLength: mask.maxLength };
             }
           }
           this.masks.push({ pattern: table, re: globToRegExp(table), columns: normalized });

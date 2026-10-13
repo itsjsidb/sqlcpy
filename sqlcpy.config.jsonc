@@ -5,7 +5,8 @@
   // 1. IGNORE – never listed, compared, copied or dropped. Triggers on an ignored table are ignored too.
   "ignore": [
     "tmp_*",
-    "*_bak"
+    "*_bak",
+    "timesheet_portal"
   ],
   "sensitive": {
     // 2a. WHOLE TABLE – the structure is copied, but not one row is ever read from the master:
@@ -22,9 +23,22 @@
     //       { "value": "..." } -> a custom fixed value (type-checked)
     //       { "from": "other_column" } -> value from a compatible, unmasked non-key column
     //       { "concat": [{ "column": "first_name" }, "@123", { "column": "last_name" }] }
-    //                  -> join text columns and static text (not raw SQL)
+    //                  -> join text columns and static text (not raw SQL).
+    //                     Optional "maxLength": N trims the result to N characters.
     // Primary-key and range columns cannot be masked – use "tables" for those.
-    "columns": {}
+    "columns": {
+      "user": {
+        "password": {
+          "concat": [
+            {
+              "column": "user_fname"
+            },
+            "@123"
+          ],
+          "maxLength": 100
+        }
+      }
+    }
   },
   // 3. RANGE – for huge tables, copy only the latest rows. The slave table then holds just that range.
   //    "column" must be a date / datetime / timestamp column and should be indexed on the master
@@ -49,6 +63,15 @@
     "timesheet": {
       "column": "date",
       "last": "1m"
+    },
+    "user_audit": {
+      "column": "modified_on",
+      "last": "1m",
+      "allowUnindexed": true
+    },
+    "hr_user_in_out_time":{
+      "column": "date",
+      "last": "12m"
     }
   }
 }
