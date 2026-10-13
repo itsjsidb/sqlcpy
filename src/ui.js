@@ -395,12 +395,12 @@ class UI {
   statusCell(it, w) {
     const sp = SPIN[this.frame % SPIN.length];
     switch (it.status) {
-      case 'same': return c('green', pad('✔ in sync', w));
-      case 'different': return c('yellow', pad('≠ differs', w));
-      case 'missing': return c('red', pad('✖ missing in slave', w));
-      case 'extra': return c('gray', pad('• only in slave', w));
-      case 'queued': return c('magenta', pad('⧖ queued', w));
-      case 'error': return c('red', A.bold + pad('✖ error (see below)', w));
+      case 'same': return c('green', pad('● in sync', w));
+      case 'different': return c('yellow', pad('◐ differs', w));
+      case 'missing': return c('red', pad('○ missing in slave', w));
+      case 'extra': return c('gray', pad('◇ only in slave', w));
+      case 'queued': return c('magenta', pad('◆ queued', w));
+      case 'error': return c('red', A.bold + pad('▲ error (see below)', w));
       case 'copying': {
         const p = this.progress;
         const frac = p && p.rowsTotal ? p.rowsDone / p.rowsTotal : 0;
@@ -423,13 +423,13 @@ class UI {
     const cnt = (st) => this.items.filter((i) => i.status === st).length;
     const tabs = [
       [null, 'cyan', `All ${this.items.length}`],
-      ['same', 'green', `✔ In sync ${cnt('same')}`],
-      ['different', 'yellow', `≠ Differ ${cnt('different')}`],
-      ['missing', 'red', `✖ Missing ${cnt('missing')}`],
-      ['extra', 'gray', `• Extra ${cnt('extra')}`],
+      ['same', 'green', `● In sync ${cnt('same')}`],
+      ['different', 'yellow', `◐ Differ ${cnt('different')}`],
+      ['missing', 'red', `○ Missing ${cnt('missing')}`],
+      ['extra', 'gray', `◇ Extra ${cnt('extra')}`],
     ];
-    if (cnt('error') || this.statusFilter === 'error') tabs.push(['error', 'red', `⚠ Error ${cnt('error')}`]);
-    tabs.push(['queued', 'magenta', `⧖ Queued ${this.queue.length}`]);
+    if (cnt('error') || this.statusFilter === 'error') tabs.push(['error', 'red', `▲ Error ${cnt('error')}`]);
+    tabs.push(['queued', 'magenta', `◆ Queued ${this.queue.length}`]);
     const tabBar = tabs.map(([key, col, label]) => (this.statusFilter === key ? A.inv + A[col] + A.bold + ` ${label} ` + A.reset : c(col, ` ${label} `))).join(c('gray', '│'));
     let left = '';
     if (this.filtering || this.filter || this.statusFilter) {
