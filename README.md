@@ -22,6 +22,85 @@ npm link        # makes the `sqlcpy` command available globally
 
 Without linking you can always run `npm start` (or `node bin/sqlcpy.js`) from the project folder.
 
+## Build a standalone Linux binary
+
+The binary includes the Node.js runtime and project dependencies, so Node.js and npm
+are not needed on the QA server. Build it from the project directory on a machine with
+Node.js and npm installed:
+
+```bash
+npm install
+npm run build:linux-x64
+```
+
+This creates `dist/sqlcpy-linux-x64` for Linux x86_64/amd64. Copy it to the QA server,
+then make it executable if needed:
+
+```bash
+chmod +x sqlcpy-linux-x64
+./sqlcpy-linux-x64
+./sqlcpy-linux-x64 run-once path/to/.env
+./sqlcpy-linux-x64 daemon path/to/.env
+```
+
+Keep `.env` and `sqlcpy.config.jsonc` outside the binary. By default sqlcpy reads them
+from the current working directory; pass an env-file path as shown above or use
+`CONFIG_FILE` to point to the policy file. The server must be Linux x86_64 with glibc
+(Alpine/musl is not supported by this target).
+
+## Build a standalone Windows binary
+
+Build the Windows x64 executable from the project directory on a machine with Node.js
+and npm installed:
+
+```powershell
+npm install
+npm run build:windows-x64
+```
+
+This creates `dist/sqlcpy-win-x64.exe` for Windows x64. Copy the executable to the QA
+server and run it from the directory containing `.env` and `sqlcpy.config.jsonc`:
+
+```powershell
+.\sqlcpy-win-x64.exe
+.\sqlcpy-win-x64.exe run-once .\.env
+.\sqlcpy-win-x64.exe daemon .\.env
+```
+
+Keep `.env` and `sqlcpy.config.jsonc` outside the executable. Both standalone targets
+include Node.js and do not require it to be installed on the server.
+
+## Build standalone macOS binaries
+
+Build the executable for your Mac architecture from the project directory on a machine
+with Node.js and npm installed. Build both architectures with:
+
+```bash
+npm install
+npm run build:macos
+```
+
+Or build only one target:
+
+```bash
+npm run build:macos-x64     # Intel Macs
+npm run build:macos-arm64   # Apple Silicon (M1/M2/M3/M4)
+```
+
+The executables are written to `dist/sqlcpy-macos-x64` and
+`dist/sqlcpy-macos-arm64`. Copy the matching executable and your external `.env` and
+`sqlcpy.config.jsonc` files to the Mac. Because cross-built macOS executables are not
+signed on this build machine, ad-hoc sign the executable on the Mac before its first run:
+
+```bash
+codesign --force --sign - ./sqlcpy-macos-arm64
+chmod +x sqlcpy-macos-arm64
+./sqlcpy-macos-arm64 run-once ./.env
+```
+
+Replace the filename with `sqlcpy-macos-x64` for an Intel Mac. The macOS executables
+bundle Node.js; Node.js and npm are not needed on the target Mac.
+
 ## Configure
 
 Create a `.env` in the directory you run `sqlcpy` from:
