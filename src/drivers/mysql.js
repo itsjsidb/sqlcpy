@@ -274,6 +274,28 @@ async function cutoff(pool, range) {
   return String(r[0].c);
 }
 
+const READ_ONLY_PRIVS = new Set([
+  'USAGE', 'SELECT', 'SHOW VIEW', 'SHOW DATABASES', 'PROCESS', 'EXECUTE', 'TRIGGER', 'REPLICATION CLIENT',
+]);
+
+/** Throws if the connected user holds any privilege beyond read access (the master must never be written to). */
+async function assertReadOnly(pool) {
+  const [rows] = await pool.query('SHOW GRANTS FOR CURRENT_USER()');
+  const bad = new Set();
+  for (const row of rows) {
+    const m = /^GRANT\s+(.+?)\s+ON\s/i.exec(String(Object.values(row)[0]));
+    if (!m) continue; // role grants etc.
+    for (const priv of m[1].split(/\s*,\s*(?![^(]*\))/)) {
+      const name = priv.replace(/\s*\(.*\)$/, '').trim().toUpperCase();
+      if (!READ_ONLY_PRIVS.has(name)) bad.add(name);
+    }
+  }
+  if (bad.size) {
+    throw new Error(`master user must be read-only, but it holds: ${[...bad].join(', ')}. ` +
+      'Create a read-only user (see README: "Read-only master user").');
+  }
+}
+
 const DROP = { tables: 'TABLE', views: 'VIEW', procedures: 'PROCEDURE', functions: 'FUNCTION', triggers: 'TRIGGER' };
 
 module.exports = {
@@ -297,6 +319,7 @@ module.exports = {
   maskExpr,
   cutoff,
   hasForeignKeys,
+  assertReadOnly,
   swapSql: (table, fresh, old) => `RENAME TABLE ${quote(table)} TO ${quote(old)}, ${quote(fresh)} TO ${quote(table)}`,
   async sessionSetup(conn) {
     await conn.query('SET FOREIGN_KEY_CHECKS=0, UNIQUE_CHECKS=0, SQL_MODE=CONCAT(@@sql_mode, \',NO_AUTO_VALUE_ON_ZERO\')');

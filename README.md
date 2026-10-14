@@ -131,6 +131,20 @@ MASK_SALT=some-long-random-string   # required only if the policy uses "hash" ma
 
 A different env file can be passed as the first argument: `sqlcpy path/to/.env`.
 
+## Read-only master user
+
+The master connection must be read-only. On scan, sqlcpy runs `SHOW GRANTS` and refuses to continue if the
+master user holds anything beyond `SELECT`, `SHOW VIEW`, `TRIGGER`, `EXECUTE` (and `USAGE`/`PROCESS`/`SHOW DATABASES`).
+
+```sql
+CREATE USER 'backup_user'@'%' IDENTIFIED BY 'change_me';
+GRANT SELECT, SHOW VIEW, TRIGGER, EXECUTE ON your_database.* TO 'backup_user'@'%';
+FLUSH PRIVILEGES;
+```
+
+Then set `master.user` / `master.password` to that user. (`TRIGGER` and `EXECUTE` are only needed to read
+trigger and routine definitions; drop them if you don't copy those.)
+
 ## Policy file
 
 `sqlcpy.config.jsonc` (comments allowed; see [sqlcpy.config.example.jsonc](sqlcpy.config.example.jsonc)) decides **what is allowed to leave the master**. Without it everything is copied in full, as before.

@@ -47,6 +47,10 @@ class SqlCpy extends EventEmitter {
   /** List both sides with the config's "ignore" rules applied, so ignored objects are never compared, copied or dropped. */
   async _list() {
     const { driver, cfg } = this;
+    if (driver.assertReadOnly) {
+      if (!this._readOnlyCheck) this._readOnlyCheck = driver.assertReadOnly(this.master);
+      await this._readOnlyCheck;
+    }
     const [m, s] = await Promise.all([driver.listObjects(this.master, cfg.master.database), driver.listObjects(this.slave, cfg.slave.database)]);
     const fm = this.rules.filter(m);
     const fsl = this.rules.filter(s);

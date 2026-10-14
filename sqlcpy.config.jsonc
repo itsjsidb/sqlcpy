@@ -67,51 +67,51 @@
   "range": {
     "timesheet": {
       "column": "date",
-      "last": "6m"
+      "last": "1m"
     },
     "user_audit": {
       "column": "modified_on",
-      "last": "6m",
+      "last": "1m",
       "allowUnindexed": true
     },
     "hr_user_in_out_time": {
       "column": "date",
-      "last": "6m",
+      "last": "1m",
       "allowUnindexed": true
     },
     "directory_audiovideo": {
       "column": "created_on",
-      "last": "6m",
+      "last": "1m",
       "allowUnindexed": true
     },
     "directory_entity": {
       "column": "created_on",
-      "last": "6m",
+      "last": "1m",
       "allowUnindexed": true
     },
     "directory_entity_file": {
       "column": "created_on",
-      "last": "6m",
+      "last": "1m",
       "allowUnindexed": true
     },
     "worksheet_task_checklist": {
       "column": "created_on",
-      "last": "6m",
+      "last": "1m",
       "allowUnindexed": true
     },
     "audits": {
       "column": "created_at",
-      "last": "6m",
+      "last": "1m",
       "allowUnindexed": true
     },
     "hr_detail":{
       "column": "created_on",
-      "last": "6m",
+      "last": "1m",
       "allowUnindexed": true
     },
     "worksheet_taskchecklist_email_for_client": {
       "column": "created_on",
-      "last": "6m",
+      "last": "1m",
       "allowUnindexed": true
     }
   },
