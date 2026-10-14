@@ -109,6 +109,44 @@ Good to know:
 - Changing the policy file invalidates the scan cache automatically.
 - In the interactive CLI, saving `sqlcpy.config.jsonc` reloads the policy and rescans automatically. Invalid edits are reported in the log and the last valid config stays active; edits are applied after any current copy finishes.
 
+## Scheduled runs (unattended)
+
+Add a `schedule` block to `sqlcpy.config.jsonc` (cron syntax as on [crontab.guru](https://crontab.guru)):
+
+```jsonc
+"schedule": {
+  "cron": "0 2 * * *",                       // every day at 02:00
+  "timezone": "Asia/Kolkata",                // optional, default: server local time
+  // "tables": ["user", "hr_*"],             // optional; omit = every table the other rules allow
+  "skipIfUnchanged": false,                  // false = always reload, so QA edits to old rows are picked up
+  "atomicSwap": false                        // true = load a temp table, then RENAME over the old one
+}
+```
+
+```
+sqlcpy daemon [path/to/.env]     # stays running, fires on "cron" (run under pm2 / systemd / a Windows service)
+sqlcpy run-once [path/to/.env]   # one pass, exit code 0 ok · 1 error · 2 a table failed (for OS cron / Task Scheduler)
+```
+
+- No terminal is needed. Each run re-reads the config file and logs to `<DUMP_DIR>/sqlcpy-schedule.log`.
+- Without `tables`, a run covers every table the rest of the file allows: `ignore`d tables are skipped, and `sensitive` / `range` rules scope what is copied. Add `tables` only to narrow a run.
+- Scheduled tables are processed and shown alphabetically by table name.
+- `ignore`, `sensitive` and `range` rules apply exactly as in the interactive tool. A `range` table only refreshes rows inside its range, so widen it if QA edits older rows.
+- A run that is still going makes the next tick skip. A failing table is logged and the others continue.
+- `skipIfUnchanged: true` compares first and copies only what differs; for tables above `CHECKSUM_MAX_MB` it compares row counts only, so an edit that keeps the count is missed. Leave it `false` if QA edits existing rows.
+- `atomicSwap: true` avoids a window with a missing table but needs room for two copies; tables with foreign keys fall back to drop + recreate.
+- Scheduled runs never touch the interactive scan cache.
+
+**Testing the schedule.** In the interactive UI press `t` for the schedule screen:
+
+| key | action |
+|---|---|
+| `e` | type any cron expression and watch the next run times update live (preview only, nothing is saved) |
+| `c` | back to the cron from the config file |
+| `tab` | switch the arrow keys between the tables and the scheduler log (both scroll) |
+| `g` then `y` | run the schedule right now, exactly as a cron tick would |
+| `esc` / `t` | back |
+
 ## Keys
 
 | key | action |

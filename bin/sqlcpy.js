@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const path = require('path');
 const { SqlCpy, loadConfig } = require('../src/index');
 const { UI } = require('../src/ui');
 const { describe } = require('../src/errors');
@@ -7,15 +8,48 @@ const { describe } = require('../src/errors');
 const col = (n, s) => `\x1b[${n}m${s}\x1b[0m`;
 const red = (s) => col(31, s), green = (s) => col(32, s), yellow = (s) => col(33, s), cyan = (s) => col(36, s), gray = (s) => col(90, s), bold = (s) => col(1, s);
 
+const COMMANDS = ['daemon', 'run-once'];
+
+/** Unattended modes: no TTY needed. `daemon` follows schedule.cron; `run-once` does one pass (for OS cron / Task Scheduler). */
+async function headless(command, cfg) {
+  const { runOnce, startDaemon, makeLogger, logFile } = require('../src/schedule');
+  const log = makeLogger(logFile(cfg));
+  if (!cfg.rules.schedule) {
+    log('ERROR', `no "schedule" block in ${cfg.rules.file || 'the config file'} – see sqlcpy.config.example.jsonc`);
+    process.exit(1);
+  }
+  const app = new SqlCpy(cfg);
+  app.headless = true;
+  if (command === 'run-once') {
+    let code = 0;
+    try {
+      const r = await runOnce(app, log);
+      code = r.failed ? 2 : 0;
+    } catch (e) {
+      log('ERROR', describe(e).message);
+      code = 1;
+    }
+    await app.close();
+    process.exit(code);
+  }
+  startDaemon(app, log);
+  const stop = async () => { log('INFO', 'stopping'); await app.close(); process.exit(0); };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+}
+
 async function main() {
+  const command = COMMANDS.includes(process.argv[2]) ? process.argv[2] : null;
+  const envPath = command ? process.argv[3] : process.argv[2];
   let cfg;
   try {
-    cfg = loadConfig(process.argv[2]);
+    cfg = loadConfig(envPath);
   } catch (e) {
     console.error(`${red('✖ Configuration error:')} ${e.message}`);
     console.error(gray(`  ${e.hint || `Looked for .env in ${process.cwd()} (or pass a path: sqlcpy path/to/.env)`}`));
     process.exit(1);
   }
+  if (command) return headless(command, cfg);
   if (!process.stdin.isTTY) {
     console.error(red('✖ sqlcpy needs an interactive terminal.'));
     process.exit(1);

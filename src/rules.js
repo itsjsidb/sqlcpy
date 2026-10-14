@@ -83,6 +83,40 @@ function checkKeys(obj, allowed, where, problems) {
 
 const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
 
+/** "schedule" block: when to run unattended and which tables to refresh. Returns the normalized object or null. */
+function parseSchedule(s, problems) {
+  if (!isObject(s)) { problems.push('schedule: must be an object with "cron" and "tables"'); return null; }
+  checkKeys(s, ['cron', 'timezone', 'tables', 'skipIfUnchanged', 'atomicSwap'], 'schedule', problems);
+  const before = problems.length;
+  if (typeof s.cron !== 'string' || s.cron.trim().split(/\s+/).length !== 5) {
+    problems.push('schedule.cron: required – a 5-field crontab expression such as "0 2 * * *" (see https://crontab.guru)');
+  } else {
+    const why = require('./cron').validate(s.cron);
+    if (why) problems.push(`schedule.cron: "${s.cron}" – ${why} (see https://crontab.guru)`);
+    else if (!require('node-cron').validate(s.cron)) problems.push(`schedule.cron: "${s.cron}" is not accepted by the scheduler – use plain numbers, ranges, lists and steps`);
+  }
+  if (s.timezone !== undefined) {
+    let ok = typeof s.timezone === 'string' && s.timezone;
+    if (ok) { try { new Intl.DateTimeFormat('en', { timeZone: s.timezone }); } catch (e) { ok = false; } }
+    if (!ok) problems.push(`schedule.timezone: "${s.timezone}" is not an IANA time zone such as "Asia/Kolkata" or "UTC"`);
+  }
+  if (s.tables !== undefined && (!Array.isArray(s.tables) || !s.tables.length || s.tables.some((x) => typeof x !== 'string' || !x))) {
+    problems.push('schedule.tables: optional – leave it out to refresh every table the other rules allow, or give a non-empty list of names / patterns (e.g. ["user", "hr_*"])');
+  }
+  for (const k of ['skipIfUnchanged', 'atomicSwap']) {
+    if (s[k] !== undefined && typeof s[k] !== 'boolean') problems.push(`schedule.${k}: must be true or false`);
+  }
+  if (problems.length > before) return null;
+  return {
+    cron: s.cron.trim().replace(/\s+/g, ' '),
+    timezone: s.timezone || null,
+    allTables: s.tables === undefined, // no list: every table that "ignore" lets through, scoped by "sensitive" / "range"
+    tables: (s.tables === undefined ? ['*'] : s.tables).map((p) => ({ pattern: p, re: globToRegExp(p) })),
+    skipIfUnchanged: s.skipIfUnchanged === true, // false: always reload, so edits to old rows are picked up
+    atomicSwap: s.atomicSwap === true,           // true: load into a temp table, then RENAME – no moment without the table
+  };
+}
+
 class Rules {
   /** @param {object} spec parsed policy  @param {string|null} file where it came from (null = no policy) */
   constructor(spec = {}, file = null, { salt = '' } = {}) {
@@ -91,7 +125,7 @@ class Rules {
     const problems = [];
     const at = file || 'config';
     if (!isObject(spec)) throw new ConfigError(`${at}: top level must be an object`);
-    checkKeys(spec, ['ignore', 'sensitive', 'range'], at, problems);
+    checkKeys(spec, ['ignore', 'sensitive', 'range', 'schedule'], at, problems);
 
     this.ignore = [];
     const ign = spec.ignore === undefined ? [] : spec.ignore;
@@ -200,6 +234,9 @@ class Rules {
       }
     }
 
+    this.schedule = null;
+    if (spec.schedule !== undefined) this.schedule = parseSchedule(spec.schedule, problems);
+
     if (problems.length) throw new ConfigError(`${at}:\n  - ${problems.join('\n  - ')}`);
     this._spec = spec;
     this._scopes = new Map();
@@ -229,7 +266,8 @@ class Rules {
 
   /** Changes whenever the policy changes, so a cached scan made under other rules is not reused. */
   get fingerprint() {
-    return crypto.createHash('sha1').update(JSON.stringify(this._spec)).digest('hex').slice(0, 12);
+    const { schedule, ...policy } = this._spec; // when to run does not change what a scan means
+    return crypto.createHash('sha1').update(JSON.stringify(policy)).digest('hex').slice(0, 12);
   }
 
   /** Exact name beats a pattern; otherwise the first declared pattern wins. */
@@ -299,6 +337,7 @@ class Rules {
     if (this.schemaOnly.length) bits.push(`${this.schemaOnly.length} schema-only`);
     if (this.masks.length) bits.push(`${this.masks.length} masked`);
     if (this.ranges.length) bits.push(`${this.ranges.length} range`);
+    if (this.schedule) bits.push(`schedule ${this.schedule.cron}`);
     return bits.length ? bits.join(' · ') + ' rule(s)' : 'no rules';
   }
 }

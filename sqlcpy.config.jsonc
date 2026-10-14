@@ -6,7 +6,11 @@
   "ignore": [
     "tmp_*",
     "*_bak",
-    "timesheet_portal"
+    "timesheet_portal",
+    "directory_entity_copy",
+    "directory_entity_file_copy",
+    "hr_detail_o",
+    "hr_detail_not_work"
   ],
   "sensitive": {
     // 2a. WHOLE TABLE – the structure is copied, but not one row is ever read from the master:
@@ -62,16 +66,58 @@
   "range": {
     "timesheet": {
       "column": "date",
-      "last": "1m"
+      "last": "6m"
     },
     "user_audit": {
       "column": "modified_on",
-      "last": "1m",
+      "last": "6m",
       "allowUnindexed": true
     },
-    "hr_user_in_out_time":{
+    "hr_user_in_out_time": {
       "column": "date",
-      "last": "6m"
+      "last": "6m",
+      "allowUnindexed": true
+    },
+    "directory_audiovideo": {
+      "column": "created_on",
+      "last": "6m",
+      "allowUnindexed": true
+    },
+    "directory_entity": {
+      "column": "created_on",
+      "last": "6m",
+      "allowUnindexed": true
+    },
+    "directory_entity_file": {
+      "column": "created_on",
+      "last": "6m",
+      "allowUnindexed": true
+    },
+    "worksheet_task_checklist": {
+      "column": "created_on",
+      "last": "6m",
+      "allowUnindexed": true
+    },
+    "audits": {
+      "column": "created_at",
+      "last": "6m",
+      "allowUnindexed": true
+    },
+    "hr_detail":{
+      "column": "created_on",
+      "last": "6m",
+      "allowUnindexed": true
+    },
+    "worksheet_taskchecklist_email_for_client": {
+      "column": "created_on",
+      "last": "6m",
+      "allowUnindexed": true
     }
+  },
+  "schedule": {
+    "cron": "15 * * * *",
+    "timezone": "Asia/Kolkata",
+    "skipIfUnchanged": false,
+    "atomicSwap": false
   }
 }

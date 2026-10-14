@@ -7,7 +7,7 @@ const { getDriver } = require('./drivers');
 const { KINDS, LABELS } = require('./objects');
 const { compareObject } = require('./compare');
 const { copyObject } = require('./copier');
-const { Rules } = require('./rules');
+const { Rules, globToRegExp } = require('./rules');
 
 /**
  * Library entry. Events: 'items' (after listing), 'item' (an item changed).
@@ -25,6 +25,7 @@ class SqlCpy extends EventEmitter {
     this.items = [];
     this.ignored = []; // [{ kind, name }] hidden by the config's "ignore" rules
     this.warnings = [];
+    this.headless = false; // true in daemon / run-once: never write the UI's scan cache
   }
 
   get ctx() {
@@ -104,7 +105,7 @@ class SqlCpy extends EventEmitter {
   }
 
   _saveCache() {
-    if (this.scanning || this._stop) return;
+    if (this.scanning || this._stop || this.headless) return; // a scheduled run must not overwrite the UI's scan cache
     const items = this.items.map((it) => {
       const status = it.status === 'queued' || it.status === 'copying' ? (it.prevStatus || 'different') : it.status;
       const { kind, name, master, slave, detail, masterRows, slaveRows, checkedAt } = it;
@@ -156,6 +157,25 @@ class SqlCpy extends EventEmitter {
     return { cached: false, at: this.scannedAt };
   }
 
+  /**
+   * Table items whose names match any of the patterns (globs, case-insensitive), compared with the slave
+   * only when the caller checks them. Used by scheduled runs and the schedule preview.
+   * Resolves to { items, unmatched: [patterns that matched no table on the master] }.
+   */
+  async tablesMatching(patterns) {
+    const [m, s] = await this._list();
+    const res = patterns.map((p) => ({ pattern: p, re: globToRegExp(p), hit: false }));
+    const items = [];
+    for (const t of m.tables) {
+      const hits = res.filter((r) => r.re.test(t.name));
+      if (!hits.length) continue;
+      hits.forEach((r) => { r.hit = true; });
+      items.push({ kind: 'tables', name: t.name, master: t, slave: s.tables.find((x) => x.name === t.name) || null, status: 'checking', detail: '', scope: this._scopeOf({ kind: 'tables', name: t.name }) });
+    }
+    items.sort((a, b) => a.name.localeCompare(b.name));
+    return { items, unmatched: res.filter((r) => !r.hit).map((r) => r.pattern) };
+  }
+
   async check(item) {
     item.status = 'checking';
     this.emit('item', item);
@@ -187,8 +207,8 @@ class SqlCpy extends EventEmitter {
   }
 
   /** Copy one object master -> slave, then re-compare. */
-  async copy(item, { onProgress, signal } = {}) {
-    const res = await copyObject(this.ctx, item.kind, item, onProgress, signal);
+  async copy(item, { onProgress, signal, swap = false } = {}) {
+    const res = await copyObject({ ...this.ctx, swap }, item.kind, item, onProgress, signal);
     const [m, s] = await this._list();
     item.master = m[item.kind].find((x) => x.name === item.name) || item.master;
     item.slave = s[item.kind].find((x) => x.name === item.name) || null;

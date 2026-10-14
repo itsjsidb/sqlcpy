@@ -4,9 +4,12 @@ const fs = require('fs');
 const path = require('path');
 const { KINDS, LABELS } = require('./objects');
 const { describe } = require('./errors');
+const cron = require('./cron');
+const { runOnce, logFile, tailLog, makeLogger } = require('./schedule');
 
 const A = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', inv: '\x1b[7m',
+  black: '\x1b[30m', bgWhite: '\x1b[47m',
   red: '\x1b[31m', green: '\x1b[32m', yellow: '\x1b[33m', blue: '\x1b[34m', magenta: '\x1b[35m', cyan: '\x1b[36m', gray: '\x1b[90m',
 };
 const c = (col, s) => A[col] + s + A.reset;
@@ -43,6 +46,14 @@ const clip = (line, w) => {
     if (m) { out += m[0]; i += m[0].length; } else { out += line[i++]; vis++; }
   }
   return out + A.reset + '…';
+};
+const selectedRow = (line, width) => {
+  const visible = line.replace(ANSI, '');
+  const padded = line + ' '.repeat(Math.max(0, width - visible.length));
+  return A.bgWhite + A.black + padded.replace(/\x1b\[([0-9;]*)m/g, (_, codes) => {
+    if (codes === '0') return A.reset + A.bgWhite + A.black;
+    return `\x1b[${codes === '90' ? '30' : codes};47m`;
+  }) + A.reset;
 };
 // Flow [key, label] hints onto as few lines as fit in w columns.
 const hintLines = (hints, w) => {
@@ -91,6 +102,8 @@ class UI {
     this.done = new Map(); // item -> {rows, bytes, file}
     this.configWatcher = null;
     this.configReloadTimer = null;
+    // schedule screen: input = cron text being previewed (null = the config's); focus = pane the arrow keys scroll
+    this.sch = { editing: false, input: null, confirm: false, running: false, scroll: 0, focus: 'table', logScroll: 0 };
   }
 
   start() {
@@ -257,7 +270,7 @@ class UI {
   }
 
   rescan(force = true) {
-    if (this.current || this.queue.length) return this.note('Finish or cancel copying before rescanning', 'yellow');
+    if (this.current || this.queue.length || this.sch.running) return this.note('Finish or cancel copying before rescanning', 'yellow');
     this.scanning = true;
     this.app.scan({ force }).then((res) => {
       this.scanning = false;
@@ -333,9 +346,11 @@ class UI {
   async onKey(k) {
     if (k.ctrl && k.name === 'c') return this.quit();
     if (this.view === 'log') return this.onLogKey(k);
+    if (this.view === 'schedule') return this.onScheduleKey(k);
     if (this.filtering) return this.onFilterKey(k);
     if (k.name === 'q') return this.quit();
     if (k.name === 'l') { this.view = 'log'; this.logItem = null; this.logScroll = 0; this.render(); return; }
+    if (k.name === 't') { this.view = 'schedule'; this.sch.scroll = 0; this.render(); return; }
     if (k.name === 'e') {
       const it = this.selected();
       if (it) { this.view = 'log'; this.logItem = it; this.logScroll = 0; this.render(); }
@@ -399,6 +414,7 @@ class UI {
 
   enqueue(item, force) {
     if (!item) return;
+    if (this.sch.running) return this.note('A scheduled run is in progress – wait for it to finish', 'yellow');
     if (item.status === 'extra') return this.note(`${item.name}: only exists in slave, nothing to copy`, 'yellow', item);
     if (item.status === 'checking') return this.note(`${item.name}: still being compared`, 'yellow', item);
     if (item.status === 'same' && !force) return this.note(`${item.name}: already in sync – skipped (press f to force)`, 'yellow', item);
@@ -457,6 +473,169 @@ class UI {
     this.render();
   }
 
+
+  // ---- schedule screen ---------------------------------------------------------------------------
+
+  /** The cron text being shown: what the user typed, else the config's. */
+  schedCron() {
+    const sched = this.app.rules.schedule;
+    return this.sch.input !== null ? this.sch.input : sched ? sched.cron : '';
+  }
+
+  schedBusy() {
+    if (this.current || this.queue.length || this.scanning || this.sch.running) {
+      this.note('Wait for the current scan / copy / run to finish', 'yellow');
+      return true;
+    }
+    return false;
+  }
+
+  onScheduleKey(k) {
+    const sch = this.sch;
+    if (k.ctrl && k.name === 'c') return this.quit();
+    if (sch.editing) {
+      if (k.name === 'escape') { sch.editing = false; sch.input = null; }
+      else if (k.name === 'return' || k.name === 'enter') sch.editing = false;
+      else if (k.name === 'backspace') sch.input = (sch.input || '').slice(0, -1);
+      else if (k.sequence && k.sequence.length === 1 && k.sequence >= ' ' && !k.ctrl && !k.meta) sch.input = (sch.input || '') + k.sequence;
+      return this.render();
+    }
+    if (sch.confirm) {
+      sch.confirm = false;
+      if (k.name === 'y') this.runScheduleNow();
+      return this.render();
+    }
+    if (k.name === 'q') return this.quit();
+    if (k.name === 'escape' || k.name === 't') this.view = 'main';
+    else if (k.name === 'e') { sch.editing = true; if (sch.input === null) sch.input = this.schedCron() || '0 2 * * *'; }
+    else if (k.name === 'c') sch.input = null;
+    else if (k.name === 'tab') sch.focus = sch.focus === 'table' ? 'log' : 'table';
+    else if (k.name === 'g') {
+      if (!this.app.rules.schedule) this.note('No "schedule" block in the config file – nothing to run', 'yellow');
+      else if (!this.schedBusy()) {
+        if (sch.input !== null && sch.input !== this.app.rules.schedule.cron) this.note('Run now uses the tables and options from the config file; the typed cron is only a preview', 'gray');
+        sch.confirm = true;
+      }
+    } else {
+      const d = { up: -1, k: -1, down: 1, j: 1, pageup: -10, pagedown: 10 }[k.name];
+      if (d && sch.focus === 'log') sch.logScroll = Math.max(0, sch.logScroll - d); // 0 = newest line at the bottom
+      else if (d) sch.scroll = Math.max(0, sch.scroll + d);
+      else if (k.name === 'home') { if (sch.focus === 'log') sch.logScroll = Infinity; else sch.scroll = 0; }
+      else if (k.name === 'end') { if (sch.focus === 'log') sch.logScroll = 0; else sch.scroll = Infinity; }
+    }
+    this.render();
+  }
+
+  runScheduleNow() {
+    const sch = this.sch;
+    if (this.schedBusy()) return;
+    sch.running = true;
+    const col = { INFO: 'gray', WARN: 'yellow', ERROR: 'red' };
+    this.note('Schedule run started by hand (same as a cron tick)', 'cyan');
+    const toFile = makeLogger(logFile(this.app.cfg), true); // same file the daemon writes, so the run shows up there too
+    const hooks = { onProgress: (p) => { this.progress = p; }, onItem: () => { this.progress = null; } };
+    runOnce(this.app, (level, msg) => { toFile(level, '[manual] ' + msg); this.note(msg, col[level] || 'gray'); this.render(); }, hooks)
+      .then((r) => {
+        sch.running = false;
+        this.progress = null;
+        this.note(r.failed ? `Run finished with ${r.failed} failure(s)` : 'Run finished', r.failed ? 'red' : 'green');
+        this.rescan(true);
+      })
+      .catch((e) => { sch.running = false; this.progress = null; this.note(`✖ Run failed: ${describe(e).message}`, 'red'); });
+  }
+
+  renderSchedule() {
+    const W = Math.max(60, process.stdout.columns || 100);
+    const H = Math.max(15, process.stdout.rows || 30);
+    const sch = this.sch;
+    const sched = this.app.rules.schedule;
+    const tz = sched ? sched.timezone : null;
+    const text = this.schedCron();
+    const typed = sch.input !== null;
+    const why = text ? cron.validate(text) : 'no schedule block in the config file';
+    const L = [];
+    L.push(` ${A.bold}${A.cyan}sqlcpy${A.reset}  ${A.bold}Schedule${A.reset}  ${c('gray', 'live view of the scheduled tables – nothing here changes the slave unless you press g')}`);
+    L.push(c('gray', ' ' + '─'.repeat(W - 2)));
+
+    const zone = tz || 'server local time';
+    L.push(` ${c('gray', 'Cron     ')} ${sch.editing ? c('cyan', text) + c('cyan', '█') : A.bold + (text || '-') + A.reset}  ${c('gray', '· ' + zone)}  ${typed ? c('yellow', '[typed preview – not saved]') : sched ? c('gray', '[from config]') : ''}`);
+    if (why) {
+      L.push(` ${c('gray', '         ')} ${c('red', '✖ ' + why)}`);
+      if (!sched) L.push(c('gray', '           add  "schedule": { "cron": "0 2 * * *", "tables": ["user"] }  to the config file (see sqlcpy.config.example.jsonc)'));
+    } else {
+      L.push(` ${c('gray', '         ')} ${c('gray', cron.breakdown(text).join(' · '))}`);
+    }
+    const now = Date.now();
+    L.push(` ${c('gray', 'Now      ')} ${cron.formatInstant(now, tz)} ${c('gray', '(' + zone + ')')}`);
+    if (sched) L.push(` ${c('gray', 'Options  ')} skipIfUnchanged ${c(sched.skipIfUnchanged ? 'green' : 'gray', String(sched.skipIfUnchanged))} · atomicSwap ${c(sched.atomicSwap ? 'green' : 'gray', String(sched.atomicSwap))}`);
+    if (sch.running) L.push(` ${c('cyan', SPIN[this.frame % SPIN.length])} ${c('cyan', 'run in progress – see the log (l)')}`);
+
+    L.push('');
+    L.push(` ${A.bold}Next runs${A.reset}`);
+    if (!why) {
+      let runs = [];
+      try { runs = cron.nextRuns(text, { from: now, tz, count: 6 }); } catch (e) { /* shown below */ }
+      if (!runs.length) L.push(c('yellow', '   never fires in the next 6 years (e.g. 30 February)'));
+      runs.forEach((t, i) => {
+        const s = Math.round((t - now) / 1000);
+        const rel = s >= 86400 ? `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h` : s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : `${Math.max(1, Math.round(s / 60))}m`;
+        L.push(`   ${c('gray', String(i + 1))}  ${cron.formatInstant(t, tz)}   ${c('gray', 'in ' + rel)}`);
+      });
+    }
+
+    L.push('');
+    // tables in scope, live: same columns and status/progress as the main screen, just no row actions
+    let body = [];
+    if (!sched) {
+      L.push(c('gray', ' Tables: none – no schedule block'));
+    } else {
+      const names = sched.allTables ? 'all tables per ignore/sensitive/range rules' : sched.tables.map((t) => t.pattern).join(', ');
+      const hit = this.items.filter((i) => i.kind === 'tables' && i.master && (sched.allTables || sched.tables.some((t) => t.re.test(i.name))));
+      L.push(` ${A.bold}Tables${A.reset} ${c('gray', `${names} → ${hit.length} in scope`)}${sch.focus === 'table' ? c('cyan', '  ◂ focus') : ''}`);
+      const nameW = Math.max(14, W - 2 - 12 - 12 - 10 - 24 - 9 - 8);
+      L.push(c('dim', `   ${pad('TABLE', nameW)} ${padL('MASTER ROWS', 11)} ${padL('SLAVE ROWS', 11)} ${padL('SIZE', 9)}  ${pad('STATUS', 24)}${padL('CHECKED', 9)}`));
+      const rows = (it) => {
+        if (it.scope && it.scope.mode === 'schema') return [null, null];
+        const r = it.scope && it.scope.mode === 'range';
+        return [r ? it.master.approxRows : it.masterRows != null ? it.masterRows : it.master.approxRows,
+          it.slave ? (r ? it.slave.approxRows : it.slaveRows != null ? it.slaveRows : it.slave.approxRows) : null];
+      };
+      body = hit.sort((a, b) => a.name.localeCompare(b.name)).map((it) => {
+        const [m, sl] = rows(it);
+        const tag = it.scope && it.scope.tag ? c('cyan', ' ' + it.scope.tag) : '';
+        return `   ${pad(it.name, nameW)} ${padL(fmtNum(m), 11)} ${padL(fmtNum(sl), 11)} ${padL(it.master ? fmtBytes(it.master.bytes) : '', 9)}  ${this.statusCell(it, 24)}${c('gray', padL(fmtAgo(it.checkedAt), 9))}${tag}`;
+      });
+      if (!hit.length && !this.scanning) body.push(c('gray', '   no table matches yet – check the config or rescan (R on the main screen)'));
+    }
+
+    // what the daemon / run-once wrote – the cron only fires in `sqlcpy daemon`, never in this window
+    const file = logFile(this.app.cfg);
+    const LOGH = Math.max(3, Math.min(10, Math.floor(H / 3)));
+    if (!sch.logAt || Date.now() - sch.logAt > 1000) { sch.logLines = tailLog(file, 400); sch.logAt = Date.now(); }
+    const lines = sch.logLines || [];
+    sch.logScroll = Math.max(0, Math.min(sch.logScroll, lines.length - LOGH));
+    const logBox = [c('gray', ' ' + '─'.repeat(W - 2)), ` ${A.bold}Scheduler log${A.reset} ${c('gray', file)}${sch.focus === 'log' ? c('cyan', '  ◂ focus') : ''}${sch.logScroll ? c('yellow', `  ↑${sch.logScroll} older`) : ''}`];
+    if (lines.length) {
+      const end = lines.length - sch.logScroll;
+      for (const line of lines.slice(Math.max(0, end - LOGH), end)) logBox.push('   ' + c(/ ERROR /.test(line) ? 'red' : / WARN /.test(line) ? 'yellow' : 'gray', line));
+    } else {
+      logBox.push(c('yellow', '   nothing logged yet – the cron fires only while  node bin/sqlcpy.js daemon  (npm run daemon) is running;'));
+      logBox.push(c('gray', '   press g to run once by hand, or start the daemon in another terminal (it works without this screen).'));
+    }
+    const bodyH = Math.max(1, H - L.length - 3 - logBox.length);
+    sch.scroll = Math.max(0, Math.min(sch.scroll, body.length - bodyH));
+    L.push(...body.slice(sch.scroll, sch.scroll + bodyH));
+    while (L.length < H - 3 - logBox.length) L.push('');
+    L.push(...logBox);
+    L.push(c('gray', ' ' + '─'.repeat(W - 2)));
+    L.push(sch.confirm
+      ? ` ${c('yellow', 'Run the schedule NOW against the slave? This drops and reloads the listed tables.')}  ${c('bold', 'y')} ${c('gray', 'confirm |')} ${c('gray', 'any other key cancels')}`
+      : sch.editing
+        ? ` ${c('gray', 'type a cron expression – next runs update live |')} ${c('bold', 'enter')} ${c('gray', 'keep |')} ${c('bold', 'esc')} ${c('gray', 'discard')}`
+        : hintLines([['e', 'try a cron expression'], ['c', 'back to config cron'], ['g', 'run now'], ['tab', 'table/log focus'], ['↑↓ PgUp/PgDn', 'scroll'], ['esc/t', 'back'], ['q', 'quit']], W)[0]);
+    process.stdout.write('\x1b[H' + L.slice(0, H).map((l) => clip(l, W) + '\x1b[K').join('\n') + '\x1b[J');
+  }
+
   async quit() {
     if (this.abort) this.abort.abort();
     this.stop();
@@ -484,6 +663,7 @@ class UI {
 
   render() {
     if (this.view === 'log') return this.renderLog();
+    if (this.view === 'schedule') return this.renderSchedule();
     const W = Math.max(60, process.stdout.columns || 100);
     const H = Math.max(15, process.stdout.rows || 30);
     const items = this.sortedItems();
@@ -535,7 +715,7 @@ class UI {
     const help = hintLines([
       ['↑↓', 'move'], ['←→', 'tab section'], ['space', 'copy'], ['a', 'copy all'], ['f', 'force'],
       ['s', 'sort column'], ['S', 'sort ASC/DESC'], ['/', 'filter'], ['v', 'status filter'], ['l', 'log'], ['e', 'item log'],
-      ['x', 'cancel all'], ['c', 'cancel selected'], ['R', 'rescan all'], ['r', 'rescan selected'], ['q', 'quit'],
+      ['t', 'schedule'], ['x', 'cancel all'], ['c', 'cancel selected'], ['R', 'rescan all'], ['r', 'rescan selected'], ['q', 'quit'],
     ], W);
     const cur = this.current;
     const detailItem = cur || selectedItem;
@@ -543,8 +723,10 @@ class UI {
     const footerH = 8 + help.length + (hasScopeDetails ? 1 : 0);
     const bodyH = Math.max(3, H - L.length - footerH);
     const curRow = Math.max(0, rows.findIndex((r) => r.idx === this.cursor));
+    const scopeRow = rows.findIndex((r) => r.idx === this.cursor && r.scoped);
+    const curEndRow = scopeRow < 0 ? curRow : scopeRow;
     if (curRow < this.scroll) this.scroll = curRow;
-    if (curRow >= this.scroll + bodyH) this.scroll = curRow - bodyH + 1;
+    if (curEndRow >= this.scroll + bodyH) this.scroll = curEndRow - bodyH + 1;
     if (this.scroll > 0 && rows[this.scroll] && !rows[this.scroll].header && rows[this.scroll - 1]?.header && curRow > this.scroll) this.scroll--;
 
     for (const r of rows.slice(this.scroll, this.scroll + bodyH)) {
@@ -552,6 +734,7 @@ class UI {
       const it = r.it;
       const scoped = Boolean(r.scoped);
       const sel = !scoped && r.idx === this.cursor;
+      const selected = r.idx === this.cursor;
       const schemaOnly = it.scope && it.scope.mode === 'schema'; // rows withheld on purpose – nothing to show
       const rangeScoped = it.scope && it.scope.mode === 'range';
       const mRows = it.kind !== 'tables' || schemaOnly ? null
@@ -562,15 +745,17 @@ class UI {
         : scoped ? it.slaveRows
           : rangeScoped ? it.slave && it.slave.approxRows
             : it.slaveRows != null ? it.slaveRows : it.slave && it.slave.approxRows;
-      const scopeCell = scopeW ? c('cyan', pad((it.scope && it.scope.tag) || '', scopeW - 1)) + ' ' : '';
+      const scopeText = pad((it.scope && it.scope.tag) || '', scopeW - 1);
+      const scopeCell = scopeW ? c('cyan', scopeText) + ' ' : '';
       const size = scoped
         ? it.master && it.master.avgRowLength > 0 && it.masterRows != null
           ? `~${fmtBytes(it.masterRows * it.master.avgRowLength)}`
           : '-'
         : it.kind === 'tables' && it.master ? fmtBytes(it.master.bytes) : it.kind === 'triggers' && it.master ? it.master.table : '';
       const nameCol = pad(scoped ? `↳ ${it.scope.tag} scoped` : it.name, nameW);
-      const line = `${sel ? c('cyan', '❯ ') : '  '}${sel ? A.inv + nameCol + A.reset : nameCol}  ${padL(fmtNum(it.kind === 'tables' && it.master ? mRows : null), 11)} ${padL(fmtNum(it.kind === 'tables' && it.slave ? sRows : null), 11)} ${padL(size, 9)}  ${this.statusCell(it, 24)} ${scopeCell}${c('gray', padL(fmtAgo(it.checkedAt), 9))}`;
-      L.push(line);
+      const line = `${sel ? '❯ ' : '  '}${nameCol}  ${padL(fmtNum(it.kind === 'tables' && it.master ? mRows : null), 11)} ${padL(fmtNum(it.kind === 'tables' && it.slave ? sRows : null), 11)} ${padL(size, 9)}  ${this.statusCell(it, 24)} ${scopeCell}${c('gray', padL(fmtAgo(it.checkedAt), 9))}`;
+      // Keep the selected row uniformly white while retaining readable status and scope colors.
+      L.push(selected ? selectedRow(line, W) : line);
     }
     if (!items.length) L.push(c('gray', '   No items match the filter'));
     while (L.length < 4 + bodyH) L.push('');

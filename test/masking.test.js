@@ -155,3 +155,54 @@ test('validates replacement types and literal lengths', async () => {
     /may produce 41 characters, exceeding its length limit of 40/,
   );
 });
+
+test('schedule block: valid cron, defaults, and strict validation', () => {
+  const ok = new Rules({ schedule: { cron: '*/15 * * * *', tables: ['user', 'hr_*'], timezone: 'Asia/Kolkata' } });
+  assert.equal(ok.schedule.cron, '*/15 * * * *');
+  assert.equal(ok.schedule.skipIfUnchanged, false);
+  assert.equal(ok.schedule.atomicSwap, false);
+  assert.equal(ok.schedule.tables.length, 2);
+  assert.equal(new Rules({}).schedule, null);
+
+  const bad = (schedule, re) => assert.throws(() => new Rules({ schedule }), re);
+  bad({ cron: 'every day', tables: ['a'] }, /schedule\.cron/);
+  bad({ cron: '0 0 31 2 99', tables: ['a'] }, /schedule\.cron/);
+  bad({ cron: '0 2 * * * *', tables: ['a'] }, /5-field/);
+  assert.equal(new Rules({ schedule: { cron: '0 2 * * *' } }).schedule.allTables, true); // follows the other rules
+  bad({ cron: '0 2 * * *', tables: [] }, /schedule\.tables/);
+  bad({ cron: '0 2 * * *', tables: ['a'], timezone: 'Mars/Base' }, /timezone/);
+  bad({ cron: '0 2 * * *', tables: ['a'], atomicSwap: 'yes' }, /atomicSwap/);
+  bad({ cron: '0 2 * * *', tables: ['a'], atomicSwa: true }, /unknown key/);
+});
+
+test('changing the schedule does not change the rules fingerprint (no needless rescans)', () => {
+  const a = new Rules({ ignore: ['x'], schedule: { cron: '0 2 * * *', tables: ['a'] } });
+  const b = new Rules({ ignore: ['x'], schedule: { cron: '0 3 * * *', tables: ['a', 'b'] } });
+  assert.equal(a.fingerprint, b.fingerprint);
+});
+
+test('schedule table matching returns tables alphabetically', async () => {
+  const { SqlCpy } = require('../src/index');
+  const app = Object.create(SqlCpy.prototype);
+  const tables = ['zebra', 'Alpha', 'beta'].map((name) => ({ name }));
+  app._list = async () => [{ tables }, { tables: [] }];
+  app.rules = { scopeOf: () => ({ mode: 'full' }) };
+
+  const { items } = await app.tablesMatching(['*']);
+  assert.deepEqual(items.map((item) => item.name), ['Alpha', 'beta', 'zebra']);
+});
+
+test('cron preview: next runs honour the time zone, day-of-month/week OR rule and validation', () => {
+  const cron = require('../src/cron');
+  const from = Date.UTC(2026, 9, 14, 10, 0, 0); // 15:30 in Kolkata
+  const fmt = (e, tz, n = 3) => cron.nextRuns(e, { from, tz, count: n }).map((t) => cron.formatInstant(t, tz));
+  assert.deepEqual(fmt('0 2 * * *', 'Asia/Kolkata', 2), ['2026-10-15 02:00 Thu', '2026-10-16 02:00 Fri']);
+  assert.deepEqual(fmt('*/20 * * * *', 'UTC', 2), ['2026-10-14 10:20 Wed', '2026-10-14 10:40 Wed']);
+  assert.deepEqual(fmt('0 9 * * mon-fri', 'UTC', 3), ['2026-10-15 09:00 Thu', '2026-10-16 09:00 Fri', '2026-10-19 09:00 Mon']);
+  assert.deepEqual(fmt('0 0 13 * fri', 'UTC', 2), ['2026-10-16 00:00 Fri', '2026-10-23 00:00 Fri']); // either day matches
+  assert.deepEqual(fmt('0 2 * * 7', 'UTC', 1), ['2026-10-18 02:00 Sun']); // 7 = Sunday
+  assert.deepEqual(cron.nextRuns('0 0 30 2 *', { from, count: 1 }), []);
+  assert.match(cron.validate('61 * * * *'), /out of range/);
+  assert.match(cron.validate('* * * *'), /5 fields/);
+  assert.equal(cron.validate('*/5 0-6 1,15 jan-mar *'), null);
+});

@@ -49,7 +49,7 @@ function buildInserts(driver, table, fields, rows) {
  * (cheap index-only query, serialised), then each worker downloads its key range from the master and
  * inserts it on its own slave connection. Mutates `prog`.
  */
-async function copyKeyedParallel({ driver, master, slave, cfg, name, pk, select, where, perChunk, chunks, conn, dump, prog, onProgress, signal }) {
+async function copyKeyedParallel({ driver, master, slave, cfg, name, pk, select, where, perChunk, chunks, conn, dump, prog, onProgress, signal, retarget }) {
   const esc = driver.quote;
   const keyCols = pk.map(esc).join(', ');
   const tuple = `(${keyCols})`;
@@ -143,7 +143,15 @@ async function copyTable(ctx, item, onProgress, signal) {
   const dump = openDump(cfg, 'tables', name);
   const conn = await slave.getConnection();
   const started = Date.now();
+  // Swap mode: load into a temp table and RENAME it over the old one, so the slave never lacks the table.
+  // Not possible with foreign keys (constraint names are per-database), and pointless for schema-only tables.
+  let swap = false; // decided inside the try below so a failed lookup still releases the connection
+  const fresh = `${name}__sqlcpy_new`;
+  const old = `${name}__sqlcpy_old`;
+  // the dump keeps the real table name; only the statement sent to the slave is pointed at the temp table
+  const retarget = (stmt) => (swap ? stmt.replace(`INSERT INTO ${esc(name)} `, () => `INSERT INTO ${esc(fresh)} `) : stmt);
   try {
+    swap = Boolean(ctx.swap && item.slave && scope.mode !== 'schema' && !(await driver.hasForeignKeys(slave, cfg.slave.database, name)));
     onProgress({ phase: 'schema', rowsDone: 0, rowsTotal: 0, bytesDone: 0, chunk: 0, chunks: 0, started });
     const ddl = driver.normalizeSql(await driver.getCreateSql(master, 'tables', name), cfg.master.database);
     const drop = driver.dropSql('tables', name);
@@ -153,8 +161,13 @@ async function copyTable(ctx, item, onProgress, signal) {
       `${driver.dumpPreamble}${drop};\n${ddl};\n\n`);
 
     await driver.sessionSetup(conn);
-    await conn.query(drop);
-    await conn.query(ddl);
+    if (swap) {
+      await conn.query(driver.dropSql('tables', fresh));
+      await conn.query(ddl.replace(esc(name), () => esc(fresh)));
+    } else {
+      await conn.query(drop);
+      await conn.query(ddl);
+    }
 
     if (scope.mode === 'schema') { // sensitive table: structure only, no row is ever read from the master
       onProgress({ phase: 'done', rowsDone: 0, rowsTotal: 0, bytesDone: 0, chunk: 0, chunks: 0, started });
@@ -176,7 +189,7 @@ async function copyTable(ctx, item, onProgress, signal) {
 
     const parallel = pk.length > 0 && cfg.concurrency > 1 && chunks > 1;
     if (parallel) {
-      await copyKeyedParallel({ driver, master, slave, cfg, name, pk: order, select, where, perChunk, chunks, conn, dump, prog, onProgress, signal });
+      await copyKeyedParallel({ driver, master, slave, cfg, name, pk: order, select, where, perChunk, chunks, conn, dump, prog, onProgress, signal, retarget });
     }
 
     let last = null;
@@ -211,8 +224,16 @@ async function copyTable(ctx, item, onProgress, signal) {
       if (rows.length < perChunk) break;
       if (cfg.chunkDelayMs) await sleep(cfg.chunkDelayMs); // let the master breathe
     }
+    if (swap) {
+      await conn.query(driver.dropSql('tables', old));
+      await conn.query(driver.swapSql(name, fresh, old));
+      await conn.query(driver.dropSql('tables', old));
+    }
     onProgress({ ...prog, phase: 'done', chunks: prog.chunk });
     return { file: dump.file, rows: prog.rowsDone, bytes: prog.bytesDone, note: scope.mode === 'full' ? undefined : note };
+  } catch (e) {
+    if (swap) { try { await conn.query(driver.dropSql('tables', fresh)); } catch (_) { /* best effort */ } }
+    throw e;
   } finally {
     try { await driver.sessionTeardown(conn); } catch (_) { /* ignore */ }
     conn.release();

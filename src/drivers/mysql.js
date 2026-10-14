@@ -23,6 +23,8 @@ const SqlString = require('sqlstring');
  *   sessionSetup(conn), sessionTeardown(conn)   relax / restore constraint checks on a slave connection
  *   dumpPreamble                       statements written at the top of a table dump
  *   dropSql(kind, name)
+ *   hasForeignKeys(pool, db, table)    does the table have, or is it referenced by, a foreign key? (blocks a rename swap)
+ *   swapSql(table, fresh, old)         one atomic statement: table -> old, fresh -> table
  */
 
 const KINDS = ['tables', 'views', 'procedures', 'functions', 'triggers'];
@@ -108,6 +110,14 @@ async function primaryKey(pool, db, table) {
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY' ORDER BY ORDINAL_POSITION`,
     [db, table]);
   return r.map((x) => x.c);
+}
+
+async function hasForeignKeys(pool, db, table) {
+  const [r] = await pool.query(
+    `SELECT COUNT(*) AS c FROM information_schema.REFERENTIAL_CONSTRAINTS
+      WHERE CONSTRAINT_SCHEMA = ? AND (TABLE_NAME = ? OR REFERENCED_TABLE_NAME = ?)`,
+    [db, table, table]);
+  return Number(r[0].c) > 0;
 }
 
 const whereOf = (where) => (where ? ` WHERE ${where.sql}` : '');
@@ -286,6 +296,8 @@ module.exports = {
   maskProblem,
   maskExpr,
   cutoff,
+  hasForeignKeys,
+  swapSql: (table, fresh, old) => `RENAME TABLE ${quote(table)} TO ${quote(old)}, ${quote(fresh)} TO ${quote(table)}`,
   async sessionSetup(conn) {
     await conn.query('SET FOREIGN_KEY_CHECKS=0, UNIQUE_CHECKS=0, SQL_MODE=CONCAT(@@sql_mode, \',NO_AUTO_VALUE_ON_ZERO\')');
   },

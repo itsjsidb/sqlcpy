@@ -62,5 +62,33 @@
 
     // small table with no index on its date column – accepted knowingly, so the check is skipped:
     "import_batches": { "column": "imported_at", "last": "90d", "allowUnindexed": true }
+  },
+
+  // 4. SCHEDULE – unattended refresh of chosen tables (no terminal needed). Start it with:
+  //       sqlcpy daemon      stays running and fires on "cron"   (use pm2 / systemd / a Windows service)
+  //       sqlcpy run-once    does one pass and exits (exit code 2 = a table failed) – for OS cron / Task Scheduler
+  //    Every run re-reads this file and logs to <DUMP_DIR>/sqlcpy-schedule.log.
+  //    "ignore", "sensitive" and "range" above apply exactly as in the interactive tool.
+  //
+  //    "cron"     5-field crontab expression, see https://crontab.guru   e.g. "0 2 * * *" = every day 02:00
+  //    "timezone" optional IANA zone, default = the server's local time   e.g. "Asia/Kolkata"
+  //    "tables"   optional. Leave it OUT to refresh every table the rest of this file allows: "ignore"d tables
+  //               are skipped, "sensitive" / "range" rules scope what is copied. Give a list of names or
+  //               patterns (* and ?) only to narrow a run to some tables.
+  //    "skipIfUnchanged" (optional, default false)
+  //       false: every run reloads every listed table, so QA edits to OLD rows are always picked up.
+  //       true:  compare first and copy only tables that differ. Faster, but for tables bigger than
+  //              CHECKSUM_MAX_MB the compare only counts rows, so an edit that keeps the count is missed.
+  //    "atomicSwap" (optional, default false)
+  //       false: the slave table is dropped and rebuilt, so it is missing/partial while it loads.
+  //       true:  load into <table>__sqlcpy_new, then RENAME it over the old table in one step – readers
+  //              never see a missing table. Needs room for two copies; tables with foreign keys fall back to false.
+  //    A "range" table only refreshes rows inside its range – widen the range if QA edits older rows.
+  "schedule": {
+    "cron": "0 2 * * *",
+    "timezone": "Asia/Kolkata",
+    // "tables": ["user", "timesheet", "hr_*"],   // optional – omit to follow ignore / sensitive / range
+    "skipIfUnchanged": false,
+    "atomicSwap": false
   }
 }
