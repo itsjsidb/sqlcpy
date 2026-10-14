@@ -6,6 +6,7 @@
   "ignore": [
     "tmp_*",
     "*_bak",
+    "*_old",
     "timesheet_portal",
     "directory_entity_copy",
     "directory_entity_file_copy",
