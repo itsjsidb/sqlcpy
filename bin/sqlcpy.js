@@ -64,9 +64,23 @@ async function main() {
     const t0 = Date.now();
     try {
       const [r] = await app[side].query('SELECT VERSION() AS v');
+      if (side === 'master' && app.driver.assertReadOnly) await app.driver.assertReadOnly(app.master);
       console.log(` ${green('✔')} ${bold(side.padEnd(6))} ${target} ${gray(`MySQL ${r[0].v} · ${Date.now() - t0}ms`)}`);
     } catch (e) {
       failed = true;
+      if (e.code === 'NOT_READ_ONLY') {
+        console.log(` ${red('✖')} ${bold(side.padEnd(6))} ${target}`);
+        console.log(`     ${red('Master user must be read-only.')}`);
+        console.log(`     ${gray('Extra privileges:')} ${yellow(e.privileges.join(', '))}`);
+        console.log(`\n     ${bold('Run this on the master as an admin, then set MASTER_USER / MASTER_PASSWORD to it:')}\n`);
+        for (const line of [
+          `CREATE USER 'backup_user'@'%' IDENTIFIED BY 'change_me';`,
+          `GRANT SELECT, SHOW VIEW, TRIGGER, EXECUTE ON \`${database}\`.* TO 'backup_user'@'%';`,
+          'FLUSH PRIVILEGES;',
+        ]) console.log(`       ${cyan(line)}`);
+        console.log('');
+        continue;
+      }
       const d = describe(e);
       console.log(` ${red('✖')} ${bold(side.padEnd(6))} ${target}`);
       console.log(`     ${red(d.code || 'ERROR')} ${d.message}`);

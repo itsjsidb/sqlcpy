@@ -291,8 +291,10 @@ async function assertReadOnly(pool) {
     }
   }
   if (bad.size) {
-    throw new Error(`master user must be read-only, but it holds: ${[...bad].join(', ')}. ` +
-      'Create a read-only user (see README: "Read-only master user").');
+    const err = new Error(`master user must be read-only, but it holds: ${[...bad].join(', ')}`);
+    err.code = 'NOT_READ_ONLY';
+    err.privileges = [...bad];
+    throw err;
   }
 }
 

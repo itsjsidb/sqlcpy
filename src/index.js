@@ -44,13 +44,17 @@ class SqlCpy extends EventEmitter {
     return true;
   }
 
+  /** Throws unless the master user is read-only (checked once per run). */
+  async ensureReadOnlyMaster() {
+    if (!this.driver.assertReadOnly) return;
+    if (!this._readOnlyCheck) this._readOnlyCheck = this.driver.assertReadOnly(this.master);
+    await this._readOnlyCheck;
+  }
+
   /** List both sides with the config's "ignore" rules applied, so ignored objects are never compared, copied or dropped. */
   async _list() {
     const { driver, cfg } = this;
-    if (driver.assertReadOnly) {
-      if (!this._readOnlyCheck) this._readOnlyCheck = driver.assertReadOnly(this.master);
-      await this._readOnlyCheck;
-    }
+    await this.ensureReadOnlyMaster();
     const [m, s] = await Promise.all([driver.listObjects(this.master, cfg.master.database), driver.listObjects(this.slave, cfg.slave.database)]);
     const fm = this.rules.filter(m);
     const fsl = this.rules.filter(s);
@@ -128,6 +132,7 @@ class SqlCpy extends EventEmitter {
    * Resolves to { cached, at }.
    */
   async scan({ force = false } = {}) {
+    await this.ensureReadOnlyMaster(); // also when serving the cache, so a writable master is never used silently
     if (!force) {
       const at = this._loadCache();
       if (at) { this.warnings = this._warnings(); this.emit('items', this.items); return { cached: true, at }; }
